@@ -15,7 +15,6 @@ import (
 // plugged within pipe scripts and pipe lines. Pipe functions must
 // not block reading or writing to the state streams. These
 // operations must be run within state tasks (see State.Task).
-type Pipe func(*State) error
 
 // State defines the environment for Pipe functions to run on.
 // Create a new State via the NewState function.
@@ -44,7 +43,72 @@ type State struct {
 	// goroutines.
 	Env []string
 
-	tasks []*task
+	pendingFlushes []*pendingFlush
+}
+
+type pendingFlush struct {
+	s State
+	f Flusher
+	c []io.Closer
+}
+
+func (pf *pendingFlush) closeWhenDone(c io.Closer) {
+	pf.c = append(pf.c, c)
+}
+
+func (pf *pendingFlush) closeAll() {
+	for _, c := range pf.c {
+		c.Close()
+	}
+}
+
+type Pipe func(s *State) error
+
+type Flusher interface {
+	Flush(s *State) error
+	Kill()
+}
+
+func (s *State) AddFlusher(f Flusher) error {
+	pf := &pendingFlush{*s, f, nil}
+	pf.s.Env = append([]string(nil), s.Env...)
+	s.pendingFlushes = append(s.pendingFlushes, pf)
+	return nil
+}
+
+func (s *State) FlushAll() error {
+	done := make(chan error, len(s.pendingFlushes))
+	for _, f := range s.pendingFlushes {
+		go func(pf *pendingFlush) {
+			err := pf.f.Flush(&pf.s)
+			pf.closeAll()
+			done <- err
+		}(f)
+	}
+	var first error
+	for _ = range s.pendingFlushes {
+		err := <-done
+		if err != nil && first == nil {
+			first = err
+			for _, pf := range s.pendingFlushes {
+				pf.f.Kill()
+			}
+		}
+	}
+	s.pendingFlushes = nil
+	return first
+}
+
+type flusherFunc func(s *State) error
+
+func (f flusherFunc) Flush(s *State) error { return f(s) }
+func (f flusherFunc) Kill()                {}
+
+func FlusherFunc(f func(s *State) error) Pipe {
+	return func(s *State) error {
+		s.AddFlusher(flusherFunc(f))
+		return nil
+	}
 }
 
 // NewState returns a new state for running pipes with.
@@ -86,46 +150,6 @@ func (s *State) SetEnvVar(name, value string) {
 	s.Env = append(s.Env, prefix+value)
 }
 
-type task struct {
-	s    State
-	f    func(*State) error
-	done func() error
-	kill func() error
-}
-
-func dummy() error { return nil }
-
-// Task creates a new task that can block reading from and/or
-// writing to the state streams.
-// Tasks are all run concurrently, and must only be run if
-// all the involved Pipe functions have returned no errors.
-func (s *State) Task(f func(*State) error) {
-	t := &task{*s, f, dummy, dummy}
-	t.s.Env = append([]string(nil), s.Env...)
-	s.tasks = append(s.tasks, t)
-}
-
-// TaskKill registers a function that must be called if interrupting
-// the previous task registered in s is necessary. Functions that are
-// blocked simply reading from and/or writing to the state streams
-// do not need a kill function, as they will be unblocked by the
-// closing of the streams used.
-func (s *State) TaskKill(f func() error) {
-	task := s.tasks[len(s.tasks)-1]
-	task.kill = chain(task.kill, f)
-}
-
-// TaskDone registers a function to be executed after the
-// previous task created in s finishes running.
-func (s *State) TaskDone(f func() error) {
-	task := s.tasks[len(s.tasks)-1]
-	task.done = chain(task.done, f)
-}
-
-func chain(f1, f2 func() error) func() error {
-	return func() error { return firstErr(f1(), f2()) }
-}
-
 func firstErr(err1, err2 error) error {
 	if err1 != nil {
 		return err1
@@ -133,34 +157,11 @@ func firstErr(err1, err2 error) error {
 	return err2
 }
 
-// RunTasks runs all tasks that were registered in the pipe state.
-func (s *State) RunTasks() error {
-	done := make(chan error, len(s.tasks))
-	for i := range s.tasks {
-		task := s.tasks[i]
-		go func() {
-			done <- firstErr(task.f(&task.s), task.done())
-		}()
-	}
-	var first error
-	for _ = range s.tasks {
-		err := <-done
-		if err != nil && first == nil {
-			first = err
-			for i := range s.tasks {
-				s.tasks[i].kill()
-			}
-		}
-	}
-	s.tasks = nil
-	return first
-}
-
 func Run(p Pipe) error {
 	s := NewState(nil, nil)
 	err := p(s)
 	if err == nil {
-		err = s.RunTasks()
+		err = s.FlushAll()
 	}
 	return err
 }
@@ -170,7 +171,7 @@ func Output(p Pipe) ([]byte, error) {
 	s := NewState(outb, nil)
 	err := p(s)
 	if err == nil {
-		err = s.RunTasks()
+		err = s.FlushAll()
 	}
 	return outb.Bytes(), err
 }
@@ -180,7 +181,7 @@ func CombinedOutput(p Pipe) ([]byte, error) {
 	s := NewState(outb, outb)
 	err := p(s)
 	if err == nil {
-		err = s.RunTasks()
+		err = s.FlushAll()
 	}
 	return outb.Bytes(), err
 }
@@ -191,7 +192,7 @@ func DisjointOutput(p Pipe) (stdout []byte, stderr []byte, err error) {
 	s := NewState(outb, errb)
 	err = p(s)
 	if err == nil {
-		err = s.RunTasks()
+		err = s.FlushAll()
 	}
 	return outb.Bytes(), errb.Bytes(), err
 }
@@ -217,36 +218,43 @@ func (out *OutputBuffer) Bytes() []byte {
 
 func Exec(name string, args ...string) Pipe {
 	return func(s *State) error {
-		ch := make(chan *os.Process, 1)
-		s.Task(func(s *State) error {
-			cmd := exec.Command(name, args...)
-			cmd.Dir = s.Dir
-			cmd.Env = s.Env
-			cmd.Stdin = s.Stdin
-			cmd.Stdout = s.Stdout
-			cmd.Stderr = s.Stderr
-			err := cmd.Start()
-			ch <- cmd.Process
-			if err != nil {
-				return err
-			}
-			if err := cmd.Wait(); err != nil {
-				return fmt.Errorf("command %q: %v", name, err)
-			}
-			return nil
-		})
-		s.TaskKill(func() error {
-			if p, ok := <-ch; ok {
-				p.Kill()
-			}
-			return nil
-		})
+		s.AddFlusher(&execFlusher{name, args, make(chan *os.Process, 1)})
 		return nil
 	}
 }
 
 func System(command string) Pipe {
 	return Exec("/bin/sh", "-c", command)
+}
+
+type execFlusher struct {
+	name string
+	args []string
+	ch   chan *os.Process
+}
+
+func (f *execFlusher) Flush(s *State) error {
+	cmd := exec.Command(f.name, f.args...)
+	cmd.Dir = s.Dir
+	cmd.Env = s.Env
+	cmd.Stdin = s.Stdin
+	cmd.Stdout = s.Stdout
+	cmd.Stderr = s.Stderr
+	err := cmd.Start()
+	f.ch <- cmd.Process
+	if err != nil {
+		return err
+	}
+	if err := cmd.Wait(); err != nil {
+		return fmt.Errorf("command %q: %v", f.name, err)
+	}
+	return nil
+}
+
+func (f *execFlusher) Kill() {
+	if p, ok := <-f.ch; ok {
+		p.Kill()
+	}
 }
 
 func ChDir(dir string) Pipe {
@@ -290,7 +298,7 @@ func Line(p ...Pipe) Pipe {
 		var r *io.PipeReader
 		var w *io.PipeWriter
 		for i, p := range p {
-			closer := r
+			closeIn := r
 			if i == end {
 				r, w = nil, nil
 				s.Stdout = endStdout
@@ -298,22 +306,44 @@ func Line(p ...Pipe) Pipe {
 				r, w = io.Pipe()
 				s.Stdout = w
 			}
-			closew := w
-			closef := func() error {
-				if closew != nil {
-					closew.Close()
-				}
-				if closer != nil {
-					//io.Copy(ioutil.Discard, closer)
-					closer.Close()
-				}
-				return nil
-			}
+			closeOut := w
+
+			oldLen := len(s.pendingFlushes)
 			if err := p(s); err != nil {
-				closef()
+				if closeIn != nil {
+					closeIn.Close()
+				}
 				return err
 			}
-			s.TaskDone(closef)
+			newLen := len(s.pendingFlushes)
+
+			// Close the created ends that were put in place for this
+			// specific Pipe after the last flusher that was registered
+			// as a consequence of running the given Pipe ends running.
+			if newLen == oldLen {
+				if closeIn != nil {
+					closeIn.Close()
+				}
+				if closeOut != nil {
+					closeOut.Close()
+				}
+			} else {
+				if closeIn != nil {
+					for fi := oldLen; fi < newLen+1; fi++ {
+						if fi == newLen || s.pendingFlushes[fi].s.Stdin != closeIn {
+							s.pendingFlushes[fi-1].closeWhenDone(closeIn)
+						}
+					}
+				}
+				if closeOut != nil {
+					for fi := newLen - 1; fi >= oldLen; fi-- {
+						if fi == oldLen || (s.pendingFlushes[fi].s.Stdout == closeOut || s.pendingFlushes[fi].s.Stderr == closeOut) {
+							s.pendingFlushes[fi].closeWhenDone(closeOut)
+						}
+					}
+				}
+			}
+
 			if i < end {
 				s.Stdin = r
 			}
@@ -329,7 +359,7 @@ func Script(p ...Pipe) Pipe {
 			if err := p(s); err != nil {
 				return err
 			}
-			if err := s.RunTasks(); err != nil {
+			if err := s.FlushAll(); err != nil {
 				return err
 			}
 		}
@@ -339,33 +369,24 @@ func Script(p ...Pipe) Pipe {
 }
 
 func Echo(str string) Pipe {
-	return func(s *State) error {
-		s.Task(func(s *State) error {
-			_, err := s.Stdout.Write([]byte(str))
-			return err
-		})
-		return nil
-	}
+	return FlusherFunc(func(s *State) error {
+		_, err := s.Stdout.Write([]byte(str))
+		return err
+	})
 }
 
 func Read(r io.Reader) Pipe {
-	return func(s *State) error {
-		s.Task(func(s *State) error {
-			_, err := io.Copy(s.Stdout, r)
-			return err
-		})
-		return nil
-	}
+	return FlusherFunc(func(s *State) error {
+		_, err := io.Copy(s.Stdout, r)
+		return err
+	})
 }
 
 func Write(w io.Writer) Pipe {
-	return func(s *State) error {
-		s.Task(func(s *State) error {
-			_, err := io.Copy(w, s.Stdin)
-			return err
-		})
-		return nil
-	}
+	return FlusherFunc(func(s *State) error {
+		_, err := io.Copy(w, s.Stdin)
+		return err
+	})
 }
 
 func Discard() Pipe {
@@ -373,58 +394,46 @@ func Discard() Pipe {
 }
 
 func Tee(w io.Writer) Pipe {
-	return func(s *State) error {
-		s.Task(func(s *State) error {
-			_, err := io.Copy(w, io.TeeReader(s.Stdin, s.Stdout))
-			return err
-		})
-		return nil
-	}
+	return FlusherFunc(func(s *State) error {
+		_, err := io.Copy(w, io.TeeReader(s.Stdin, s.Stdout))
+		return err
+	})
 }
 
 func ReadFile(path string) Pipe {
-	return func(s *State) error {
-		s.Task(func(s *State) error {
-			file, err := os.Open(filepath.Join(s.Dir, path))
-			if err != nil {
-				return err
-			}
-			_, err = io.Copy(s.Stdout, file)
-			file.Close()
+	return FlusherFunc(func(s *State) error {
+		file, err := os.Open(filepath.Join(s.Dir, path))
+		if err != nil {
 			return err
-		})
-		return nil
-	}
+		}
+		_, err = io.Copy(s.Stdout, file)
+		file.Close()
+		return err
+	})
 }
 
 func WriteFile(path string, perm os.FileMode) Pipe {
-	return func(s *State) error {
-		s.Task(func(s *State) error {
-			path = filepath.Join(s.Dir, path)
-			file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
-			if err != nil {
-				return err
-			}
-			_, err = io.Copy(file, s.Stdin)
-			return firstErr(err, file.Close())
-		})
-		return nil
-	}
+	return FlusherFunc(func(s *State) error {
+		path = filepath.Join(s.Dir, path)
+		file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
+		if err != nil {
+			return err
+		}
+		_, err = io.Copy(file, s.Stdin)
+		return firstErr(err, file.Close())
+	})
 }
 
 func TeeFile(path string, perm os.FileMode) Pipe {
-	return func(s *State) error {
-		s.Task(func(s *State) error {
-			// BUG: filepath.Join missing; test it first.
-			file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
-			if err != nil {
-				return err
-			}
-			_, err = io.Copy(file, io.TeeReader(s.Stdin, s.Stdout))
-			return firstErr(err, file.Close())
-		})
-		return nil
-	}
+	return FlusherFunc(func(s *State) error {
+		// BUG: filepath.Join missing; test it first.
+		file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
+		if err != nil {
+			return err
+		}
+		_, err = io.Copy(file, io.TeeReader(s.Stdin, s.Stdout))
+		return firstErr(err, file.Close())
+	})
 }
 
 //pipe.If(pipe.IsFile("/foo"), func(p pipe.Line) (Line, error) {
