@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
 
 // Pipe functions implement arbitrary functionality that may be
@@ -64,22 +65,6 @@ type State struct {
 	pendingFlushes []*pendingFlush
 }
 
-type pendingFlush struct {
-	s State
-	f Flusher
-	c []io.Closer
-}
-
-func (pf *pendingFlush) closeWhenDone(c io.Closer) {
-	pf.c = append(pf.c, c)
-}
-
-func (pf *pendingFlush) closeAll() {
-	for _, c := range pf.c {
-		c.Close()
-	}
-}
-
 // NewState returns a new state for running pipes with.
 func NewState(stdout, stderr io.Writer) *State {
 	if stdout == nil {
@@ -96,10 +81,41 @@ func NewState(stdout, stderr io.Writer) *State {
 	}
 }
 
+type pendingFlush struct {
+	s State
+	f Flusher
+	c []io.Closer
+
+	wg sync.WaitGroup
+	wf []*pendingFlush
+}
+
+func (pf *pendingFlush) closeWhenDone(c io.Closer) {
+	pf.c = append(pf.c, c)
+}
+
+func (pf *pendingFlush) waitFor(other *pendingFlush) {
+	pf.wg.Add(1)
+	other.wf = append(other.wf, pf)
+}
+
+func (pf *pendingFlush) wait() {
+	pf.wg.Wait()
+}
+
+func (pf *pendingFlush) done() {
+	for _, c := range pf.c {
+		c.Close()
+	}
+	for _, wf := range pf.wf {
+		wf.wg.Done()
+	}
+}
+
 // AddFlusher adds f to be flushed concurrently by FlushAll once the
 // whole pipe finishes running.
 func (s *State) AddFlusher(f Flusher) error {
-	pf := &pendingFlush{*s, f, nil}
+	pf := &pendingFlush{s: *s, f: f}
 	pf.s.Env = append([]string(nil), s.Env...)
 	s.pendingFlushes = append(s.pendingFlushes, pf)
 	return nil
@@ -110,8 +126,9 @@ func (s *State) FlushAll() error {
 	done := make(chan error, len(s.pendingFlushes))
 	for _, f := range s.pendingFlushes {
 		go func(pf *pendingFlush) {
+			pf.wait()
 			err := pf.f.Flush(&pf.s)
-			pf.closeAll()
+			pf.done()
 			done <- err
 		}(f)
 	}
@@ -366,51 +383,43 @@ func Line(p ...Pipe) Pipe {
 		var r *io.PipeReader
 		var w *io.PipeWriter
 		for i, p := range p {
-			closeIn := r
+			var closeIn, closeOut *refCloser
+			if r != nil {
+				closeIn = &refCloser{r, 1}
+			}
 			if i == end {
 				r, w = nil, nil
 				s.Stdout = endStdout
 			} else {
 				r, w = io.Pipe()
 				s.Stdout = w
+				closeOut = &refCloser{w, 1}
 			}
-			closeOut := w
 
 			oldLen := len(s.pendingFlushes)
 			if err := p(s); err != nil {
-				if closeIn != nil {
-					closeIn.Close()
-				}
+				closeIn.Close()
 				return err
 			}
 			newLen := len(s.pendingFlushes)
 
-			// Close the created ends that were put in place for this
-			// specific Pipe after the last flusher that was registered
-			// as a consequence of running the given Pipe ends running.
-			if newLen == oldLen {
-				if closeIn != nil {
-					closeIn.Close()
+			for fi := oldLen; fi < newLen; fi++ {
+				pf := s.pendingFlushes[fi]
+				if c, ok := pf.s.Stdin.(io.Closer); ok && closeIn.uses(c) {
+					closeIn.refs++
+					pf.closeWhenDone(closeIn)
 				}
-				if closeOut != nil {
-					closeOut.Close()
+				if c, ok := pf.s.Stdout.(io.Closer); ok && closeOut.uses(c) {
+					closeOut.refs++
+					pf.closeWhenDone(closeOut)
 				}
-			} else {
-				if closeIn != nil {
-					for fi := oldLen; fi < newLen+1; fi++ {
-						if fi == newLen || s.pendingFlushes[fi].s.Stdin != closeIn {
-							s.pendingFlushes[fi-1].closeWhenDone(closeIn)
-						}
-					}
-				}
-				if closeOut != nil {
-					for fi := newLen - 1; fi >= oldLen; fi-- {
-						if fi == oldLen || (s.pendingFlushes[fi].s.Stdout == closeOut || s.pendingFlushes[fi].s.Stderr == closeOut) {
-							s.pendingFlushes[fi].closeWhenDone(closeOut)
-						}
-					}
+				if c, ok := pf.s.Stderr.(io.Closer); ok && closeOut.uses(c) {
+					closeOut.refs++
+					pf.closeWhenDone(closeOut)
 				}
 			}
+			closeIn.Close()
+			closeOut.Close()
 
 			if i < end {
 				s.Stdin = r
@@ -418,6 +427,22 @@ func Line(p ...Pipe) Pipe {
 		}
 		return nil
 	}
+}
+
+type refCloser struct {
+	c    io.Closer
+	refs int32
+}
+
+func (rc *refCloser) uses(c io.Closer) bool {
+	return rc != nil && rc.c == c
+}
+
+func (rc *refCloser) Close() error {
+	if rc != nil && atomic.AddInt32(&rc.refs, -1) == 0 {
+		return rc.c.Close()
+	}
+	return nil
 }
 
 // Script creates a pipe sequence with the provided entries.
@@ -431,16 +456,28 @@ func Script(p ...Pipe) Pipe {
 			s.Dir = dir
 			s.Env = env
 		}()
+		startLen := len(s.pendingFlushes)
 		for _, p := range p {
+			oldLen := len(s.pendingFlushes)
 			if err := p(s); err != nil {
 				return err
 			}
-			if err := s.FlushAll(); err != nil {
-				return err
+			newLen := len(s.pendingFlushes)
+
+			for fi := oldLen; fi < newLen; fi++ {
+				for wi := startLen; wi < oldLen; wi++ {
+					s.pendingFlushes[fi].waitFor(s.pendingFlushes[wi])
+				}
 			}
 		}
 		return nil
 	}
+}
+
+type serialFlusher []Flusher
+
+func (f serialFlusher) Flush(s *State) {
+
 }
 
 type flushFunc func(s *State) error
@@ -544,10 +581,12 @@ func Filter(f func(line string) bool) Pipe {
 		r := bufio.NewReader(s.Stdin)
 		for {
 			line, err := r.ReadBytes('\n')
-			if err == io.EOF {
-				return nil
-			}
-			if err != nil {
+			eof := err == io.EOF
+			if eof {
+				if len(line) == 0 {
+					return nil
+				}
+			} else if err != nil {
 				return err
 			}
 			if f(string(bytes.TrimRight(line, "\r\n"))) {
@@ -555,6 +594,9 @@ func Filter(f func(line string) bool) Pipe {
 				if err != nil {
 					return err
 				}
+			}
+			if eof {
+				return nil
 			}
 		}
 	})

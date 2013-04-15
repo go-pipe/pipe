@@ -23,7 +23,10 @@ var _ = Suite(S{})
 func (S) TestStatePath(c *C) {
 	s := pipe.NewState(nil, nil)
 	s.Dir = "/a"
-	tests := []struct{ path []string; result string }{
+	tests := []struct {
+		path   []string
+		result string
+	}{
 		{[]string{}, "/a"},
 		{[]string{""}, "/a"},
 		{[]string{"b"}, "/a/b"},
@@ -37,7 +40,7 @@ func (S) TestStatePath(c *C) {
 
 func (S) TestExecRun(c *C) {
 	path := filepath.Join(c.MkDir(), "file")
-	p := pipe.Exec("/bin/sh", "-c", "echo hello > " + path)
+	p := pipe.Exec("/bin/sh", "-c", "echo hello > "+path)
 	err := pipe.Run(p)
 	c.Assert(err, IsNil)
 
@@ -89,7 +92,7 @@ func (S) TestLine(c *C) {
 func (S) TestLineTermination(c *C) {
 	// Shouldn't block waiting for a reader that won't read.
 	var b []byte
-	for i := 0; i < 256 * 1024 / 8; i++ {
+	for i := 0; i < 256*1024/8; i++ {
 		b = append(b, "xxxxxxxx"...)
 	}
 	p := pipe.Line(
@@ -227,6 +230,37 @@ func (S) TestLineIsolatesDir(c *C) {
 	c.Assert(err, IsNil)
 	c.Assert(string(output), Equals, dir1+"\n")
 }
+
+func (S) TestLineNesting(c *C) {
+	b := &bytes.Buffer{}
+	p := pipe.Line(
+		pipe.Echo("hello"),
+		pipe.Line(
+			pipe.Filter(func(line string) bool { return true }),
+			pipe.Exec("sed", "s/l/k/g"),
+		),
+		pipe.Write(b),
+	)
+	err := pipe.Run(p)
+	c.Assert(err, IsNil)
+	c.Assert(b.String(), Equals, "hekko")
+}
+
+func (S) TestScriptNesting(c *C) {
+	b := &bytes.Buffer{}
+	p := pipe.Line(
+		pipe.Echo("hello"),
+		pipe.Script(
+			pipe.Echo("world"),
+			pipe.Exec("sed", "s/l/k/g"),
+		),
+		pipe.Write(b),
+	)
+	err := pipe.Run(p)
+	c.Assert(err, IsNil)
+	c.Assert(b.String(), Equals, "worldhekko")
+}
+
 func (S) TestChDir(c *C) {
 	wd1, err := os.Getwd()
 	c.Assert(err, IsNil)
@@ -265,7 +299,7 @@ func (S) TestMkDir(c *C) {
 
 	stat, err := os.Stat(subsubdir)
 	c.Assert(err, IsNil)
-	c.Assert(stat.Mode() & os.ModePerm, Equals, os.FileMode(0700))
+	c.Assert(stat.Mode()&os.ModePerm, Equals, os.FileMode(0700))
 }
 
 func (S) TestEcho(c *C) {
@@ -410,7 +444,7 @@ func (S) TestWriteFileMode(c *C) {
 
 	stat, err := os.Stat(path)
 	c.Assert(err, IsNil)
-	c.Assert(stat.Mode() & os.ModePerm, Equals, os.FileMode(0600))
+	c.Assert(stat.Mode()&os.ModePerm, Equals, os.FileMode(0600))
 }
 
 func (S) TestTeeFileAbsolute(c *C) {
@@ -430,7 +464,7 @@ func (S) TestTeeFileAbsolute(c *C) {
 
 	stat, err := os.Stat(path)
 	c.Assert(err, IsNil)
-	c.Assert(stat.Mode() & os.ModePerm, Equals, os.FileMode(0600))
+	c.Assert(stat.Mode()&os.ModePerm, Equals, os.FileMode(0600))
 }
 
 func (S) TestTeeFileRelative(c *C) {
@@ -462,7 +496,7 @@ func (S) TestTeeFileMode(c *C) {
 
 	stat, err := os.Stat(path)
 	c.Assert(err, IsNil)
-	c.Assert(stat.Mode() & os.ModePerm, Equals, os.FileMode(0600))
+	c.Assert(stat.Mode()&os.ModePerm, Equals, os.FileMode(0600))
 }
 
 func (S) TestFilter(c *C) {
@@ -473,4 +507,14 @@ func (S) TestFilter(c *C) {
 	output, err := pipe.Output(p)
 	c.Assert(err, IsNil)
 	c.Assert(string(output), Equals, "out1\nout3\n")
+}
+
+func (S) TestFilterNoNewLine(c *C) {
+	p := pipe.Line(
+		pipe.Echo("out1\nout2\nout3"),
+		pipe.Filter(func(line string) bool { return line != "out2" }),
+	)
+	output, err := pipe.Output(p)
+	c.Assert(err, IsNil)
+	c.Assert(string(output), Equals, "out1\nout3")
 }
