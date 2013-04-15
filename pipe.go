@@ -12,18 +12,36 @@ import (
 )
 
 // Pipe functions implement arbitrary functionality that may be
-// plugged within pipe scripts and pipe lines. Pipe functions must
-// not block reading or writing to the state streams. These
-// operations must be run within state tasks (see State.Task).
+// integrated with pipe scripts and pipe lines. Pipe functions
+// must not block reading or writing to the state streams. These
+// operations must be run from a Flusher.
+type Pipe func(s *State) error
+
+// A Flusher is responsible for flowing data from the input
+// stream and/or to the output streams of the pipe.
+type Flusher interface {
+
+	// Flush flows data from the input stream and/or to the output
+	// streams of the pipe. It must block while doing so, and only
+	// return once its activities have terminated completely.
+	// It is run concurrently with other flushers.
+	Flush(s *State) error
+
+	// Kill abruptly interrupts in-progress activities of Flush if errors
+	// have happened elsewhere. If Flush is blocked simply reading from
+	// and/or writing to the state streams, Kill doesn't have to do
+	// anything as Flush will be unblocked by the closing of the streams.
+	Kill()
+}
 
 // State defines the environment for Pipe functions to run on.
 // Create a new State via the NewState function.
 type State struct {
 
-	// Stdin, Stdout, and Stderr represent the respective data
-	// streams that the Pipe may choose to manipulate when running.
-	// Reading from and writing to these streams must be done from
-	// within a task created via the Task method.
+	// Stdin, Stdout, and Stderr represent the respective data streams
+	// that the Pipe may act upon. Reading from and/or writing to these
+	// streams must be done from within a Flusher registered via
+	// the AddFlusher method.
 	// The three streams are initialized by NewState and must
 	// never be set to nil.
 	Stdin  io.Reader
@@ -32,15 +50,13 @@ type State struct {
 
 	// Dir represents the directory in which all filesystem-related
 	// operations performed by the Pipe must be run on. It defaults
-	// to the current directory, and may be changed by Pipe functions,
-	// although changes must not be done from tasks or other goroutines.
+	// to the current directory, and may be changed by Pipe functions.
 	Dir string
 
 	// Env is the process environment in which all executions performed
 	// by the Pipe must be run on. It defaults to a copy of the
 	// environmnet from the current process, and may be changed by Pipe
-	// functions, although changes must not be done from tasks or other
-	// goroutines.
+	// functions.
 	Env []string
 
 	pendingFlushes []*pendingFlush
@@ -62,13 +78,24 @@ func (pf *pendingFlush) closeAll() {
 	}
 }
 
-type Pipe func(s *State) error
-
-type Flusher interface {
-	Flush(s *State) error
-	Kill()
+// NewState returns a new state for running pipes with.
+func NewState(stdout, stderr io.Writer) *State {
+	if stdout == nil {
+		stdout = ioutil.Discard
+	}
+	if stderr == nil {
+		stderr = ioutil.Discard
+	}
+	return &State{
+		Stdin:  strings.NewReader(""),
+		Stdout: stdout,
+		Stderr: stderr,
+		Env:    os.Environ(),
+	}
 }
 
+// AddFlusher adds f to be flushed concurrently by FlushAll once the
+// whole pipe finishes running.
 func (s *State) AddFlusher(f Flusher) error {
 	pf := &pendingFlush{*s, f, nil}
 	pf.s.Env = append([]string(nil), s.Env...)
@@ -76,6 +103,7 @@ func (s *State) AddFlusher(f Flusher) error {
 	return nil
 }
 
+// FlushAll flushes all pending flushers registered via AddFlusher.
 func (s *State) FlushAll() error {
 	done := make(chan error, len(s.pendingFlushes))
 	for _, f := range s.pendingFlushes {
@@ -97,34 +125,6 @@ func (s *State) FlushAll() error {
 	}
 	s.pendingFlushes = nil
 	return first
-}
-
-type flusherFunc func(s *State) error
-
-func (f flusherFunc) Flush(s *State) error { return f(s) }
-func (f flusherFunc) Kill()                {}
-
-func FlusherFunc(f func(s *State) error) Pipe {
-	return func(s *State) error {
-		s.AddFlusher(flusherFunc(f))
-		return nil
-	}
-}
-
-// NewState returns a new state for running pipes with.
-func NewState(stdout, stderr io.Writer) *State {
-	if stdout == nil {
-		stdout = ioutil.Discard
-	}
-	if stderr == nil {
-		stderr = ioutil.Discard
-	}
-	return &State{
-		Stdin:  strings.NewReader(""),
-		Stdout: stdout,
-		Stderr: stderr,
-		Env:    os.Environ(),
-	}
 }
 
 // EnvVar returns the value for the named environment variable in s.
@@ -150,6 +150,22 @@ func (s *State) SetEnvVar(name, value string) {
 	s.Env = append(s.Env, prefix+value)
 }
 
+// Path returns the provided path relative to the state's current directory.
+// If multiple arguments are provided, they're joined via filepath.Join.
+// If path is absolute, it is taken by itself.
+func (s *State) Path(path ...string) string {
+	if len(path) == 0 {
+		return s.Dir
+	}
+	if filepath.IsAbs(path[0]) {
+		return filepath.Join(path...)
+	}
+	if len(path) == 1 {
+		return filepath.Join(s.Dir, path[0])
+	}
+	return filepath.Join(append([]string{s.Dir}, path...)...)
+}
+
 func firstErr(err1, err2 error) error {
 	if err1 != nil {
 		return err1
@@ -157,6 +173,9 @@ func firstErr(err1, err2 error) error {
 	return err2
 }
 
+// Run runs the p pipe without holding its output.
+//
+// See functions Output, CombinedOutput, and DisjointOutput.
 func Run(p Pipe) error {
 	s := NewState(nil, nil)
 	err := p(s)
@@ -166,6 +185,9 @@ func Run(p Pipe) error {
 	return err
 }
 
+// Output runs the p pipe and returns its stdout output.
+//
+// See functions Run, CombinedOutput, and DisjointOutput.
 func Output(p Pipe) ([]byte, error) {
 	outb := &OutputBuffer{}
 	s := NewState(outb, nil)
@@ -176,6 +198,10 @@ func Output(p Pipe) ([]byte, error) {
 	return outb.Bytes(), err
 }
 
+// CombinedOutput runs the p pipe and returns its stdout and stderr
+// outputs merged together.
+//
+// See functions Run, Output, and DisjointOutput.
 func CombinedOutput(p Pipe) ([]byte, error) {
 	outb := &OutputBuffer{}
 	s := NewState(outb, outb)
@@ -186,6 +212,9 @@ func CombinedOutput(p Pipe) ([]byte, error) {
 	return outb.Bytes(), err
 }
 
+// DisjointOutput runs the p pipe and returns its stdout and stderr outputs.
+//
+// See functions Run, Output, and CombinedOutput..
 func DisjointOutput(p Pipe) (stdout []byte, stderr []byte, err error) {
 	outb := &OutputBuffer{}
 	errb := &OutputBuffer{}
@@ -197,18 +226,23 @@ func DisjointOutput(p Pipe) (stdout []byte, stderr []byte, err error) {
 	return outb.Bytes(), errb.Bytes(), err
 }
 
+// OutputBuffer is a concurrency safe writer that buffers all input.
+//
+// It is used in the implementation of the output functions.
 type OutputBuffer struct {
 	m   sync.Mutex
 	buf []byte
 }
 
-func (out *OutputBuffer) Write(p []byte) (n int, err error) {
+// Writes appends b to out's buffered data.
+func (out *OutputBuffer) Write(b []byte) (n int, err error) {
 	out.m.Lock()
-	out.buf = append(out.buf, p...)
+	out.buf = append(out.buf, b...)
 	out.m.Unlock()
-	return len(p), nil
+	return len(b), nil
 }
 
+// Bytes returns all the data written into out.
 func (out *OutputBuffer) Bytes() []byte {
 	out.m.Lock()
 	buf := out.buf
@@ -216,6 +250,7 @@ func (out *OutputBuffer) Bytes() []byte {
 	return buf
 }
 
+// Exec returns a pipe that runs the named program with the given arguments.
 func Exec(name string, args ...string) Pipe {
 	return func(s *State) error {
 		s.AddFlusher(&execFlusher{name, args, make(chan *os.Process, 1)})
@@ -223,8 +258,10 @@ func Exec(name string, args ...string) Pipe {
 	}
 }
 
-func System(command string) Pipe {
-	return Exec("/bin/sh", "-c", command)
+// System returns a pipe that runs cmd via a system shell.
+// It is equivalent to the pipe Exec("/bin/sh", "-c", cmd).
+func System(cmd string) Pipe {
+	return Exec("/bin/sh", "-c", cmd)
 }
 
 type execFlusher struct {
@@ -252,24 +289,36 @@ func (f *execFlusher) Flush(s *State) error {
 }
 
 func (f *execFlusher) Kill() {
-	if p, ok := <-f.ch; ok {
+	if p := <-f.ch; p != nil {
 		p.Kill()
 	}
 }
 
+// ChDir changes the pipe's current directory. If dir is relative,
+// the change is made relative to the pipe's previous current directory.
+//
+// Other than it being the default current directory for new pipes,
+// the working directory of the running process isn't considered or
+// changed.
 func ChDir(dir string) Pipe {
 	return func(s *State) error {
-		s.Dir = filepath.Join(s.Dir, dir)
+		s.Dir = s.Path(dir)
 		return nil
 	}
 }
 
+// MkDir creates dir with the provided perm bits. If dir is relative,
+// the created path is relative to the pipe's current directory.
 func MkDir(dir string, perm os.FileMode) Pipe {
 	return func(s *State) error {
-		return os.Mkdir(filepath.Join(s.Dir, dir), perm)
+		return os.Mkdir(s.Path(dir), perm)
 	}
 }
 
+// SetEnvVar sets the value of the named environment variable in the pipe.
+//
+// Other than it being the default for new pipes, the environment of the
+// running process isn't consulted or changed.
 func SetEnvVar(name string, value string) Pipe {
 	return func(s *State) error {
 		s.SetEnvVar(name, value)
@@ -277,6 +326,9 @@ func SetEnvVar(name string, value string) Pipe {
 	}
 }
 
+// CombineToErr modifes the stdout stream in the pipe so it is the same
+// as the stderr stream. As a consequence, all further stdout output
+// will be written to the stderr stream.
 func CombineToErr() Pipe {
 	return func(s *State) error {
 		s.Stdout = s.Stderr
@@ -284,6 +336,9 @@ func CombineToErr() Pipe {
 	}
 }
 
+// CombineToOut modifes the stderr stream in the pipe so it is the same
+// as the stdout stream. As a consequence, all further stderr output
+// will be written to the stdout stream.
 func CombineToOut() Pipe {
 	return func(s *State) error {
 		s.Stderr = s.Stdout
@@ -291,8 +346,19 @@ func CombineToOut() Pipe {
 	}
 }
 
+// Line creates a pipeline with the provided entries. The stdout of entry
+// N in the pipeline is connected to the stdin of entry N+1.
+// Entries are run sequentially, but flushed concurrently.
 func Line(p ...Pipe) Pipe {
 	return func(s *State) error {
+		dir := s.Dir
+		env := s.Env
+		s.Env = append([]string(nil), s.Env...)
+		defer func() {
+			s.Dir = dir
+			s.Env = env
+		}()
+
 		end := len(p) - 1
 		endStdout := s.Stdout
 		var r *io.PipeReader
@@ -352,9 +418,17 @@ func Line(p ...Pipe) Pipe {
 	}
 }
 
+// Script creates a pipe sequence with the provided entries.
+// Entries are run and immediately flushed sequentially.
 func Script(p ...Pipe) Pipe {
 	return func(s *State) error {
-		env := append([]string(nil), s.Env...)
+		dir := s.Dir
+		env := s.Env
+		s.Env = append([]string(nil), s.Env...)
+		defer func() {
+			s.Dir = dir
+			s.Env = env
+		}()
 		for _, p := range p {
 			if err := p(s); err != nil {
 				return err
@@ -363,46 +437,67 @@ func Script(p ...Pipe) Pipe {
 				return err
 			}
 		}
-		s.Env = env
 		return nil
 	}
 }
 
+type flushFunc func(s *State) error
+
+func (f flushFunc) Flush(s *State) error { return f(s) }
+func (f flushFunc) Kill()                {}
+
+// FlushFunc is a helper to define a Pipe that adds a Flusher
+// with f as its Flush method.
+func FlushFunc(f func(s *State) error) Pipe {
+	return func(s *State) error {
+		s.AddFlusher(flushFunc(f))
+		return nil
+	}
+}
+
+// Echo writes str to the pipe's stdout.
 func Echo(str string) Pipe {
-	return FlusherFunc(func(s *State) error {
+	return FlushFunc(func(s *State) error {
 		_, err := s.Stdout.Write([]byte(str))
 		return err
 	})
 }
 
+// Read reads data from r and writes it into the pipe's stdout.
 func Read(r io.Reader) Pipe {
-	return FlusherFunc(func(s *State) error {
+	return FlushFunc(func(s *State) error {
 		_, err := io.Copy(s.Stdout, r)
 		return err
 	})
 }
 
+// Write writes into w the data read from the pipe's stdin.
 func Write(w io.Writer) Pipe {
-	return FlusherFunc(func(s *State) error {
+	return FlushFunc(func(s *State) error {
 		_, err := io.Copy(w, s.Stdin)
 		return err
 	})
 }
 
+// Discard reads data from the pipe's stdin and discards it.
 func Discard() Pipe {
 	return Write(ioutil.Discard)
 }
 
+// Tee reads data from the pipe's stdin and writes it both to
+// the pipe's stdout and into w.
 func Tee(w io.Writer) Pipe {
-	return FlusherFunc(func(s *State) error {
+	return FlushFunc(func(s *State) error {
 		_, err := io.Copy(w, io.TeeReader(s.Stdin, s.Stdout))
 		return err
 	})
 }
 
+// ReadFile reads data from the file at path and writes it into the
+// pipe's stdout.
 func ReadFile(path string) Pipe {
-	return FlusherFunc(func(s *State) error {
-		file, err := os.Open(filepath.Join(s.Dir, path))
+	return FlushFunc(func(s *State) error {
+		file, err := os.Open(s.Path(path))
 		if err != nil {
 			return err
 		}
@@ -412,10 +507,11 @@ func ReadFile(path string) Pipe {
 	})
 }
 
+// WriteFile writes into the file at path the data read from the
+// pipe's stdin. If the file doesn't exist, it is created with perm.
 func WriteFile(path string, perm os.FileMode) Pipe {
-	return FlusherFunc(func(s *State) error {
-		path = filepath.Join(s.Dir, path)
-		file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
+	return FlushFunc(func(s *State) error {
+		file, err := os.OpenFile(s.Path(path), os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
 		if err != nil {
 			return err
 		}
@@ -424,10 +520,12 @@ func WriteFile(path string, perm os.FileMode) Pipe {
 	})
 }
 
+// TeeFile reads data from the pipe's stdin and writes it both to
+// the pipe's stdout and into the file at path. If the file doesn't
+// exist, it is created with perm.
 func TeeFile(path string, perm os.FileMode) Pipe {
-	return FlusherFunc(func(s *State) error {
-		// BUG: filepath.Join missing; test it first.
-		file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
+	return FlushFunc(func(s *State) error {
+		file, err := os.OpenFile(s.Path(path), os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
 		if err != nil {
 			return err
 		}
@@ -435,5 +533,3 @@ func TeeFile(path string, perm os.FileMode) Pipe {
 		return firstErr(err, file.Close())
 	})
 }
-
-//pipe.If(pipe.IsFile("/foo"), func(p pipe.Line) (Line, error) {

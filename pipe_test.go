@@ -20,6 +20,21 @@ type S struct{}
 
 var _ = Suite(S{})
 
+func (S) TestStatePath(c *C) {
+	s := pipe.NewState(nil, nil)
+	s.Dir = "/a"
+	tests := []struct{ path []string; result string }{
+		{[]string{}, "/a"},
+		{[]string{""}, "/a"},
+		{[]string{"b"}, "/a/b"},
+		{[]string{"b", "c"}, "/a/b/c"},
+		{[]string{"/b", "c"}, "/b/c"},
+	}
+	for _, t := range tests {
+		c.Assert(s.Path(t.path...), Equals, t.result)
+	}
+}
+
 func (S) TestExecRun(c *C) {
 	path := filepath.Join(c.MkDir(), "file")
 	p := pipe.Exec("/bin/sh", "-c", "echo hello > " + path)
@@ -170,6 +185,48 @@ func (S) TestScriptIsolatesEnv(c *C) {
 	c.Assert(string(output), Equals, "outer\n")
 }
 
+func (S) TestScriptIsolatesDir(c *C) {
+	dir1 := c.MkDir()
+	dir2 := c.MkDir()
+	p := pipe.Script(
+		pipe.ChDir(dir1),
+		pipe.Script(
+			pipe.ChDir(dir2),
+		),
+		pipe.System("echo $PWD"),
+	)
+	output, err := pipe.Output(p)
+	c.Assert(err, IsNil)
+	c.Assert(string(output), Equals, dir1+"\n")
+}
+
+func (S) TestLineIsolatesEnv(c *C) {
+	p := pipe.Line(
+		pipe.SetEnvVar("PIPE_VAR", "outer"),
+		pipe.Line(
+			pipe.SetEnvVar("PIPE_VAR", "inner"),
+		),
+		pipe.System("echo $PIPE_VAR"),
+	)
+	output, err := pipe.Output(p)
+	c.Assert(err, IsNil)
+	c.Assert(string(output), Equals, "outer\n")
+}
+
+func (S) TestLineIsolatesDir(c *C) {
+	dir1 := c.MkDir()
+	dir2 := c.MkDir()
+	p := pipe.Line(
+		pipe.ChDir(dir1),
+		pipe.Line(
+			pipe.ChDir(dir2),
+		),
+		pipe.System("echo $PWD"),
+	)
+	output, err := pipe.Output(p)
+	c.Assert(err, IsNil)
+	c.Assert(string(output), Equals, dir1+"\n")
+}
 func (S) TestChDir(c *C) {
 	wd1, err := os.Getwd()
 	c.Assert(err, IsNil)
@@ -323,10 +380,6 @@ func (S) TestWriteFileAbsolute(c *C) {
 	data, err := ioutil.ReadFile(path)
 	c.Assert(err, IsNil)
 	c.Assert(string(data), Equals, "hekko")
-
-	stat, err := os.Stat(path)
-	c.Assert(err, IsNil)
-	c.Assert(stat.Mode() & os.ModePerm, Equals, os.FileMode(0600))
 }
 
 func (S) TestWriteFileRelative(c *C) {
@@ -360,7 +413,7 @@ func (S) TestWriteFileMode(c *C) {
 	c.Assert(stat.Mode() & os.ModePerm, Equals, os.FileMode(0600))
 }
 
-func (S) TestTeeFile(c *C) {
+func (S) TestTeeFileAbsolute(c *C) {
 	path := filepath.Join(c.MkDir(), "file")
 	p := pipe.Line(
 		pipe.Echo("hello"),
@@ -380,11 +433,34 @@ func (S) TestTeeFile(c *C) {
 	c.Assert(stat.Mode() & os.ModePerm, Equals, os.FileMode(0600))
 }
 
-func (S) TestReplace(c *C) {
+func (S) TestTeeFileRelative(c *C) {
+	dir := c.MkDir()
+	path := filepath.Join(dir, "file")
+	p := pipe.Line(
+		pipe.ChDir(dir),
+		pipe.Echo("hello"),
+		pipe.Exec("sed", "s/l/k/g"),
+		pipe.TeeFile("file", 0600),
+	)
+	output, err := pipe.Output(p)
+	c.Assert(err, IsNil)
+	c.Assert(string(output), Equals, "hekko")
+
+	data, err := ioutil.ReadFile(path)
+	c.Assert(err, IsNil)
+	c.Assert(string(data), Equals, "hekko")
 }
 
-func (S) TestFilter(c *C) {
-}
+func (S) TestTeeFileMode(c *C) {
+	path := filepath.Join(c.MkDir(), "file")
+	p := pipe.Line(
+		pipe.Echo("hello"),
+		pipe.TeeFile(path, 0600),
+	)
+	err := pipe.Run(p)
+	c.Assert(err, IsNil)
 
-func (S) TestLines(c *C) {
+	stat, err := os.Stat(path)
+	c.Assert(err, IsNil)
+	c.Assert(stat.Mode() & os.ModePerm, Equals, os.FileMode(0600))
 }
