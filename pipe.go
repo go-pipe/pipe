@@ -147,8 +147,8 @@ func (pf *pendingFlush) done() {
 	}
 }
 
-// AddFlusher adds f to be flushed concurrently by FlushAll once the
-// whole pipe finishes running.
+// AddFlusher adds f to be flushed concurrently with other
+// flushers as appropriate for the pipe.
 func (s *State) AddFlusher(f Flusher) error {
 	pf := &pendingFlush{s: *s, f: f}
 	pf.s.Env = append([]string(nil), s.Env...)
@@ -157,6 +157,8 @@ func (s *State) AddFlusher(f Flusher) error {
 }
 
 // FlushAll flushes all pending flushers registered via AddFlusher.
+// This is called by the pipe running functions and generally
+// there's no reason to call it directly.
 func (s *State) FlushAll() error {
 	done := make(chan error, len(s.pendingFlushes))
 	for _, f := range s.pendingFlushes {
