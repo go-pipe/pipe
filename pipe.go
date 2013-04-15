@@ -98,6 +98,9 @@ type State struct {
 }
 
 // NewState returns a new state for running pipes with.
+// The state's Stdout and Stderr are set to the provided streams,
+// Stdin is initialized to an empty reader, and Env is initialized to
+// the environment of the current process.
 func NewState(stdout, stderr io.Writer) *State {
 	if stdout == nil {
 		stdout = ioutil.Discard
@@ -224,7 +227,7 @@ func firstErr(err1, err2 error) error {
 	return err2
 }
 
-// Run runs the p pipe without holding its output.
+// Run runs the p pipe discarding its output.
 //
 // See functions Output, CombinedOutput, and DisjointOutput.
 func Run(p Pipe) error {
@@ -504,12 +507,6 @@ func Script(p ...Pipe) Pipe {
 		}
 		return nil
 	}
-}
-
-type serialFlusher []Flusher
-
-func (f serialFlusher) Flush(s *State) {
-
 }
 
 type flushFunc func(s *State) error
