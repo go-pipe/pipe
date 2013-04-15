@@ -481,7 +481,7 @@ func (rc *refCloser) Close() error {
 }
 
 // Script creates a pipe sequence with the provided entries.
-// Entries are run and immediately flushed sequentially.
+// Entries are both run and flushed sequentially.
 func Script(p ...Pipe) Pipe {
 	return func(s *State) error {
 		dir := s.Dir
