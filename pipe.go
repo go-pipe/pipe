@@ -1,6 +1,8 @@
 package pipe
 
 import (
+	"bufio"
+	"bytes"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -242,7 +244,7 @@ func (out *OutputBuffer) Write(b []byte) (n int, err error) {
 	return len(b), nil
 }
 
-// Bytes returns all the data written into out.
+// Bytes returns all the data written to out.
 func (out *OutputBuffer) Bytes() []byte {
 	out.m.Lock()
 	buf := out.buf
@@ -463,7 +465,7 @@ func Echo(str string) Pipe {
 	})
 }
 
-// Read reads data from r and writes it into the pipe's stdout.
+// Read reads data from r and writes it to the pipe's stdout.
 func Read(r io.Reader) Pipe {
 	return FlushFunc(func(s *State) error {
 		_, err := io.Copy(s.Stdout, r)
@@ -471,7 +473,7 @@ func Read(r io.Reader) Pipe {
 	})
 }
 
-// Write writes into w the data read from the pipe's stdin.
+// Write writes to w the data read from the pipe's stdin.
 func Write(w io.Writer) Pipe {
 	return FlushFunc(func(s *State) error {
 		_, err := io.Copy(w, s.Stdin)
@@ -485,7 +487,7 @@ func Discard() Pipe {
 }
 
 // Tee reads data from the pipe's stdin and writes it both to
-// the pipe's stdout and into w.
+// the pipe's stdout and to w.
 func Tee(w io.Writer) Pipe {
 	return FlushFunc(func(s *State) error {
 		_, err := io.Copy(w, io.TeeReader(s.Stdin, s.Stdout))
@@ -493,7 +495,7 @@ func Tee(w io.Writer) Pipe {
 	})
 }
 
-// ReadFile reads data from the file at path and writes it into the
+// ReadFile reads data from the file at path and writes it to the
 // pipe's stdout.
 func ReadFile(path string) Pipe {
 	return FlushFunc(func(s *State) error {
@@ -507,7 +509,7 @@ func ReadFile(path string) Pipe {
 	})
 }
 
-// WriteFile writes into the file at path the data read from the
+// WriteFile writes to the file at path the data read from the
 // pipe's stdin. If the file doesn't exist, it is created with perm.
 func WriteFile(path string, perm os.FileMode) Pipe {
 	return FlushFunc(func(s *State) error {
@@ -521,7 +523,7 @@ func WriteFile(path string, perm os.FileMode) Pipe {
 }
 
 // TeeFile reads data from the pipe's stdin and writes it both to
-// the pipe's stdout and into the file at path. If the file doesn't
+// the pipe's stdout and to the file at path. If the file doesn't
 // exist, it is created with perm.
 func TeeFile(path string, perm os.FileMode) Pipe {
 	return FlushFunc(func(s *State) error {
@@ -531,5 +533,29 @@ func TeeFile(path string, perm os.FileMode) Pipe {
 		}
 		_, err = io.Copy(file, io.TeeReader(s.Stdin, s.Stdout))
 		return firstErr(err, file.Close())
+	})
+}
+
+// Filter filters lines read from the pipe's stdin so that only those
+// for which f is true are written to the pipe's stdout.
+// The line provided to f has '\n' and '\r' trimmed.
+func Filter(f func(line string) bool) Pipe {
+	return FlushFunc(func(s *State) error {
+		r := bufio.NewReader(s.Stdin)
+		for {
+			line, err := r.ReadBytes('\n')
+			if err == io.EOF {
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			if f(string(bytes.TrimRight(line, "\r\n"))) {
+				_, err := s.Stdout.Write(line)
+				if err != nil {
+					return err
+				}
+			}
+		}
 	})
 }

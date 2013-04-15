@@ -464,3 +464,13 @@ func (S) TestTeeFileMode(c *C) {
 	c.Assert(err, IsNil)
 	c.Assert(stat.Mode() & os.ModePerm, Equals, os.FileMode(0600))
 }
+
+func (S) TestFilter(c *C) {
+	p := pipe.Line(
+		pipe.System("echo out1; echo err1 1>&2; echo out2; echo err2 1>&2; echo out3"),
+		pipe.Filter(func(line string) bool { return line != "out2" }),
+	)
+	output, err := pipe.Output(p)
+	c.Assert(err, IsNil)
+	c.Assert(string(output), Equals, "out1\nout3\n")
+}
