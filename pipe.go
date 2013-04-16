@@ -486,13 +486,13 @@ func (rc *refCloser) Close() error {
 // Entries are both run and flushed sequentially.
 func Script(p ...Pipe) Pipe {
 	return func(s *State) error {
-		dir := s.Dir
-		env := s.Env
+		saved := *s
 		s.Env = append([]string(nil), s.Env...)
 		defer func() {
-			s.Dir = dir
-			s.Env = env
+			s.Dir = saved.Dir
+			s.Env = saved.Env
 		}()
+
 		startLen := len(s.pendingFlushes)
 		for _, p := range p {
 			oldLen := len(s.pendingFlushes)
@@ -500,6 +500,10 @@ func Script(p ...Pipe) Pipe {
 				return err
 			}
 			newLen := len(s.pendingFlushes)
+
+			s.Stdin = saved.Stdin
+			s.Stdout = saved.Stdout
+			s.Stderr = saved.Stderr
 
 			for fi := oldLen; fi < newLen; fi++ {
 				for wi := startLen; wi < oldLen; wi++ {
@@ -529,6 +533,15 @@ func FlushFunc(f func(s *State) error) Pipe {
 func Echo(str string) Pipe {
 	return FlushFunc(func(s *State) error {
 		_, err := s.Stdout.Write([]byte(str))
+		return err
+	})
+}
+
+// Echof provides format and args to fmt.Sprintf and writes
+// the resulting string to the pipe's stdout.
+func Echof(format string, args ...interface{}) Pipe {
+	return FlushFunc(func(s *State) error {
+		_, err := s.Stdout.Write([]byte(fmt.Sprintf(format, args...)))
 		return err
 	})
 }

@@ -261,6 +261,19 @@ func (S) TestScriptNesting(c *C) {
 	c.Assert(b.String(), Equals, "worldhekko")
 }
 
+func (S) TestScriptPreservesStreams(c *C) {
+	p := pipe.Script(
+		pipe.Line(
+			pipe.Echo("hello\n"),
+			pipe.Discard(),
+		),
+		pipe.Exec("echo", "world"),
+	)
+	output, err := pipe.Output(p)
+	c.Assert(err, IsNil)
+	c.Assert(string(output), Equals, "world\n")
+}
+
 func (S) TestChDir(c *C) {
 	wd1, err := os.Getwd()
 	c.Assert(err, IsNil)
@@ -305,6 +318,16 @@ func (S) TestMkDir(c *C) {
 func (S) TestEcho(c *C) {
 	p := pipe.Line(
 		pipe.Echo("hello"),
+		pipe.Exec("sed", "s/l/k/g"),
+	)
+	output, err := pipe.Output(p)
+	c.Assert(err, IsNil)
+	c.Assert(string(output), Equals, "hekko")
+}
+
+func (S) TestEchof(c *C) {
+	p := pipe.Line(
+		pipe.Echof("he%so", "ll"),
 		pipe.Exec("sed", "s/l/k/g"),
 	)
 	output, err := pipe.Output(p)
