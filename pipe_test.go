@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"io/ioutil"
-	"labix.org/v1/pipe"
+	"labix.org/v2/pipe"
 	. "launchpad.net/gocheck"
 	"os"
 	"path/filepath"
