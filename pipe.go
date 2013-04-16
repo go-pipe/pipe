@@ -509,17 +509,27 @@ func FlushFunc(f func(s *State) error) Pipe {
 	}
 }
 
-// Echo writes str to the pipe's stdout.
-func Echo(str string) Pipe {
+// Print provides args to fmt.Sprint and writes the resuling
+// string to the pipe's stdout.
+func Print(args ...interface{}) Pipe {
 	return FlushFunc(func(s *State) error {
-		_, err := s.Stdout.Write([]byte(str))
+		_, err := s.Stdout.Write([]byte(fmt.Sprint(args...)))
 		return err
 	})
 }
 
-// Echof provides format and args to fmt.Sprintf and writes
+// Println provides args to fmt.Sprintln and writes the resuling
+// string to the pipe's stdout.
+func Println(args ...interface{}) Pipe {
+	return FlushFunc(func(s *State) error {
+		_, err := s.Stdout.Write([]byte(fmt.Sprintln(args...)))
+		return err
+	})
+}
+
+// Printf provides format and args to fmt.Sprintf and writes
 // the resulting string to the pipe's stdout.
-func Echof(format string, args ...interface{}) Pipe {
+func Printf(format string, args ...interface{}) Pipe {
 	return FlushFunc(func(s *State) error {
 		_, err := s.Stdout.Write([]byte(fmt.Sprintf(format, args...)))
 		return err

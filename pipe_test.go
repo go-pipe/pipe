@@ -96,7 +96,7 @@ func (S) TestLineTermination(c *C) {
 		b = append(b, "xxxxxxxx"...)
 	}
 	p := pipe.Line(
-		pipe.Echo(string(b)),
+		pipe.Print(string(b)),
 		pipe.Exec("true"),
 	)
 	output, err := pipe.Output(p)
@@ -212,7 +212,7 @@ func (S) TestLineIsolatesDir(c *C) {
 func (S) TestLineNesting(c *C) {
 	b := &bytes.Buffer{}
 	p := pipe.Line(
-		pipe.Echo("hello"),
+		pipe.Print("hello"),
 		pipe.Line(
 			pipe.Filter(func(line string) bool { return true }),
 			pipe.Exec("sed", "s/l/k/g"),
@@ -227,9 +227,9 @@ func (S) TestLineNesting(c *C) {
 func (S) TestScriptNesting(c *C) {
 	b := &bytes.Buffer{}
 	p := pipe.Line(
-		pipe.Echo("hello"),
+		pipe.Print("hello"),
 		pipe.Script(
-			pipe.Echo("world"),
+			pipe.Print("world"),
 			pipe.Exec("sed", "s/l/k/g"),
 		),
 		pipe.Write(b),
@@ -242,7 +242,7 @@ func (S) TestScriptNesting(c *C) {
 func (S) TestScriptPreservesStreams(c *C) {
 	p := pipe.Script(
 		pipe.Line(
-			pipe.Echo("hello\n"),
+			pipe.Print("hello\n"),
 			pipe.Discard(),
 		),
 		pipe.Exec("echo", "world"),
@@ -293,24 +293,34 @@ func (S) TestMkDir(c *C) {
 	c.Assert(stat.Mode()&os.ModePerm, Equals, os.FileMode(0700))
 }
 
-func (S) TestEcho(c *C) {
+func (S) TestPrint(c *C) {
 	p := pipe.Line(
-		pipe.Echo("hello"),
+		pipe.Print("hello:", 42),
 		pipe.Exec("sed", "s/l/k/g"),
 	)
 	output, err := pipe.Output(p)
 	c.Assert(err, IsNil)
-	c.Assert(string(output), Equals, "hekko")
+	c.Assert(string(output), Equals, "hekko:42")
 }
 
-func (S) TestEchof(c *C) {
+func (S) TestPrintln(c *C) {
 	p := pipe.Line(
-		pipe.Echof("he%so", "ll"),
+		pipe.Println("hello:", 42),
 		pipe.Exec("sed", "s/l/k/g"),
 	)
 	output, err := pipe.Output(p)
 	c.Assert(err, IsNil)
-	c.Assert(string(output), Equals, "hekko")
+	c.Assert(string(output), Equals, "hekko: 42\n")
+}
+
+func (S) TestPrintf(c *C) {
+	p := pipe.Line(
+		pipe.Printf("hello:%d", 42),
+		pipe.Exec("sed", "s/l/k/g"),
+	)
+	output, err := pipe.Output(p)
+	c.Assert(err, IsNil)
+	c.Assert(string(output), Equals, "hekko:42")
 }
 
 func (S) TestRead(c *C) {
@@ -326,7 +336,7 @@ func (S) TestRead(c *C) {
 func (S) TestWrite(c *C) {
 	var b bytes.Buffer
 	p := pipe.Line(
-		pipe.Echo("hello"),
+		pipe.Print("hello"),
 		pipe.Exec("sed", "s/l/k/g"),
 		pipe.Write(&b),
 	)
@@ -338,9 +348,9 @@ func (S) TestWrite(c *C) {
 
 func (S) TestDiscard(c *C) {
 	p := pipe.Line(
-		pipe.Echo("hello"),
+		pipe.Print("hello"),
 		pipe.Discard(),
-		pipe.Echo("world"),
+		pipe.Print("world"),
 	)
 	output, err := pipe.Output(p)
 	c.Assert(err, IsNil)
@@ -350,7 +360,7 @@ func (S) TestDiscard(c *C) {
 func (S) TestTee(c *C) {
 	var b bytes.Buffer
 	p := pipe.Line(
-		pipe.Echo("hello"),
+		pipe.Print("hello"),
 		pipe.Exec("sed", "s/l/k/g"),
 		pipe.Tee(&b),
 	)
@@ -404,7 +414,7 @@ func (S) TestReadFileNonExistent(c *C) {
 func (S) TestWriteFileAbsolute(c *C) {
 	path := filepath.Join(c.MkDir(), "file")
 	p := pipe.Line(
-		pipe.Echo("hello"),
+		pipe.Print("hello"),
 		pipe.Exec("sed", "s/l/k/g"),
 		pipe.WriteFile(path, 0600),
 	)
@@ -423,7 +433,7 @@ func (S) TestWriteFileRelative(c *C) {
 	p := pipe.Script(
 		pipe.ChDir(dir),
 		pipe.Line(
-			pipe.Echo("hello"),
+			pipe.Print("hello"),
 			pipe.Exec("sed", "s/l/k/g"),
 			pipe.WriteFile("file", 0600),
 		),
@@ -452,11 +462,11 @@ func (S) TestAppendFileAbsolute(c *C) {
 	path := filepath.Join(c.MkDir(), "file")
 	p := pipe.Script(
 		pipe.Line(
-			pipe.Echo("hello "),
+			pipe.Print("hello "),
 			pipe.AppendFile(path, 0600),
 		),
 		pipe.Line(
-			pipe.Echo("world!"),
+			pipe.Print("world!"),
 			pipe.AppendFile(path, 0600),
 		),
 	)
@@ -475,11 +485,11 @@ func (S) TestAppendFileRelative(c *C) {
 	p := pipe.Script(
 		pipe.ChDir(dir),
 		pipe.Line(
-			pipe.Echo("hello "),
+			pipe.Print("hello "),
 			pipe.AppendFile("file", 0600),
 		),
 		pipe.Line(
-			pipe.Echo("world!"),
+			pipe.Print("world!"),
 			pipe.AppendFile("file", 0600),
 		),
 	)
@@ -506,7 +516,7 @@ func (S) TestAppendFileMode(c *C) {
 func (S) TestTeeFileAbsolute(c *C) {
 	path := filepath.Join(c.MkDir(), "file")
 	p := pipe.Line(
-		pipe.Echo("hello"),
+		pipe.Print("hello"),
 		pipe.Exec("sed", "s/l/k/g"),
 		pipe.TeeFile(path, 0600),
 	)
@@ -528,7 +538,7 @@ func (S) TestTeeFileRelative(c *C) {
 	path := filepath.Join(dir, "file")
 	p := pipe.Line(
 		pipe.ChDir(dir),
-		pipe.Echo("hello"),
+		pipe.Print("hello"),
 		pipe.Exec("sed", "s/l/k/g"),
 		pipe.TeeFile("file", 0600),
 	)
@@ -544,7 +554,7 @@ func (S) TestTeeFileRelative(c *C) {
 func (S) TestTeeFileMode(c *C) {
 	path := filepath.Join(c.MkDir(), "file")
 	p := pipe.Line(
-		pipe.Echo("hello"),
+		pipe.Print("hello"),
 		pipe.TeeFile(path, 0600),
 	)
 	err := pipe.Run(p)
@@ -567,7 +577,7 @@ func (S) TestFilter(c *C) {
 
 func (S) TestFilterNoNewLine(c *C) {
 	p := pipe.Line(
-		pipe.Echo("out1\nout2\nout3"),
+		pipe.Print("out1\nout2\nout3"),
 		pipe.Filter(func(line string) bool { return line != "out2" }),
 	)
 	output, err := pipe.Output(p)
