@@ -129,11 +129,11 @@ func (S) TestErrorHandling(c *C) {
 	sync := make(chan bool)
 	p := pipe.Script(
 		pipe.Line(
-			pipe.FlushFunc(func(*pipe.State) error {
+			pipe.TaskFunc(func(*pipe.State) error {
 				sync <- true
 				return fmt.Errorf("err1")
 			}),
-			pipe.FlushFunc(func(*pipe.State) error {
+			pipe.TaskFunc(func(*pipe.State) error {
 				<-sync
 				return fmt.Errorf("err2")
 			}),

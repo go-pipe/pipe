@@ -50,23 +50,26 @@ import (
 // Pipe functions implement arbitrary functionality that may be
 // integrated with pipe scripts and pipe lines. Pipe functions
 // must not block reading or writing to the state streams. These
-// operations must be run from a Flusher.
+// operations must be run from a Task.
 type Pipe func(s *State) error
 
-// A Flusher is responsible for flowing data from the input
-// stream and/or to the output streams of the pipe.
-type Flusher interface {
+// A Task may be registered by a Pipe into a State to run any
+// activity concurrently with other tasks.
+// Tasks registered within the execution of a Script only run after
+// the preceding entries in the same script have succeeded.
+type Task interface {
 
-	// Flush flows data from the input stream and/or to the output
-	// streams of the pipe. It must block while doing so, and only
-	// return once its activities have terminated completely.
-	// It is run concurrently with other flushers.
-	Flush(s *State) error
+	// Run runs the task concurrently with other tasks as appropriate
+	// for the pipe. Run may flow data from the input stream and/or
+	// to the output streams of the pipe, and it must block while doing
+	// so. It must return only after all of its activities have
+	// terminated completely.
+	Run(s *State) error
 
-	// Kill abruptly interrupts in-progress activities of Flush if errors
-	// have happened elsewhere. If Flush is blocked simply reading from
-	// and/or writing to the state streams, Kill doesn't have to do
-	// anything as Flush will be unblocked by the closing of the streams.
+	// Kill abruptly interrupts in-progress activities being done by Run.
+	// If Run is blocked simply reading from and/or writing to the state
+	// streams, Kill doesn't have to do anything as Run will be unblocked
+	// by the closing of the streams.
 	Kill()
 }
 
@@ -76,10 +79,8 @@ type State struct {
 
 	// Stdin, Stdout, and Stderr represent the respective data streams
 	// that the Pipe may act upon. Reading from and/or writing to these
-	// streams must be done from within a Flusher registered via
-	// the AddFlusher method.
-	// The three streams are initialized by NewState and must
-	// never be set to nil.
+	// streams must be done from within a Task registered via AddTask.
+	// The three streams are initialized by NewState and must not be nil.
 	Stdin  io.Reader
 	Stdout io.Writer
 	Stderr io.Writer
@@ -95,7 +96,7 @@ type State struct {
 	// functions.
 	Env []string
 
-	pendingFlushes []*pendingFlush
+	pendingTasks []*pendingTask
 }
 
 // NewState returns a new state for running pipes with.
@@ -117,39 +118,39 @@ func NewState(stdout, stderr io.Writer) *State {
 	}
 }
 
-type pendingFlush struct {
+type pendingTask struct {
 	s State
-	f Flusher
+	t Task
 	c []io.Closer
 
 	wg sync.WaitGroup
-	wf []*pendingFlush
+	wt []*pendingTask
 
 	cancel int32
 }
 
-func (pf *pendingFlush) closeWhenDone(c io.Closer) {
-	pf.c = append(pf.c, c)
+func (pt *pendingTask) closeWhenDone(c io.Closer) {
+	pt.c = append(pt.c, c)
 }
 
-func (pf *pendingFlush) waitFor(other *pendingFlush) {
-	pf.wg.Add(1)
-	other.wf = append(other.wf, pf)
+func (pt *pendingTask) waitFor(other *pendingTask) {
+	pt.wg.Add(1)
+	other.wt = append(other.wt, pt)
 }
 
-func (pf *pendingFlush) wait() {
-	pf.wg.Wait()
+func (pt *pendingTask) wait() {
+	pt.wg.Wait()
 }
 
-func (pf *pendingFlush) done(err error) {
-	for _, c := range pf.c {
+func (pt *pendingTask) done(err error) {
+	for _, c := range pt.c {
 		c.Close()
 	}
-	for _, wf := range pf.wf {
+	for _, wt := range pt.wt {
 		if err != nil {
-			atomic.AddInt32(&wf.cancel, 1)
+			atomic.AddInt32(&wt.cancel, 1)
 		}
-		wf.wg.Done()
+		wt.wg.Done()
 	}
 }
 
@@ -163,39 +164,39 @@ func (e Errors) Error() string {
 	return strings.Join(errors, "; ")
 }
 
-// AddFlusher adds f to be flushed concurrently with other
-// flushers as appropriate for the pipe.
-func (s *State) AddFlusher(f Flusher) error {
-	pf := &pendingFlush{s: *s, f: f}
-	pf.s.Env = append([]string(nil), s.Env...)
-	s.pendingFlushes = append(s.pendingFlushes, pf)
+// AddTask adds t to be run concurrently with other tasks
+// as appropriate for the pipe.
+func (s *State) AddTask(t Task) error {
+	pt := &pendingTask{s: *s, t: t}
+	pt.s.Env = append([]string(nil), s.Env...)
+	s.pendingTasks = append(s.pendingTasks, pt)
 	return nil
 }
 
-// FlushAll flushes all pending flushers registered via AddFlusher.
+// RunAll runs all pending flushers registered via AddTask.
 // This is called by the pipe running functions and generally
 // there's no reason to call it directly.
-func (s *State) FlushAll() error {
-	done := make(chan error, len(s.pendingFlushes))
-	for _, f := range s.pendingFlushes {
-		go func(pf *pendingFlush) {
-			pf.wait()
+func (s *State) RunAll() error {
+	done := make(chan error, len(s.pendingTasks))
+	for _, f := range s.pendingTasks {
+		go func(pt *pendingTask) {
+			pt.wait()
 			var err error
-			if pf.cancel == 0 {
-				err = pf.f.Flush(&pf.s)
+			if pt.cancel == 0 {
+				err = pt.t.Run(&pt.s)
 			}
-			pf.done(err)
+			pt.done(err)
 			done <- err
 		}(f)
 	}
 	var errs Errors
 	var goodErr, badErr bool
-	for _ = range s.pendingFlushes {
+	for _ = range s.pendingTasks {
 		err := <-done
 		if err != nil {
 			if errs == nil {
-				for _, pf := range s.pendingFlushes {
-					pf.f.Kill()
+				for _, pt := range s.pendingTasks {
+					pt.t.Kill()
 				}
 			}
 			errs = append(errs, err)
@@ -206,7 +207,7 @@ func (s *State) FlushAll() error {
 			}
 		}
 	}
-	s.pendingFlushes = nil
+	s.pendingTasks = nil
 	if errs == nil {
 		return nil
 	}
@@ -289,7 +290,7 @@ func Run(p Pipe) error {
 	s := NewState(nil, nil)
 	err := p(s)
 	if err == nil {
-		err = s.FlushAll()
+		err = s.RunAll()
 	}
 	return err
 }
@@ -302,7 +303,7 @@ func Output(p Pipe) ([]byte, error) {
 	s := NewState(outb, nil)
 	err := p(s)
 	if err == nil {
-		err = s.FlushAll()
+		err = s.RunAll()
 	}
 	return outb.Bytes(), err
 }
@@ -316,7 +317,7 @@ func CombinedOutput(p Pipe) ([]byte, error) {
 	s := NewState(outb, outb)
 	err := p(s)
 	if err == nil {
-		err = s.FlushAll()
+		err = s.RunAll()
 	}
 	return outb.Bytes(), err
 }
@@ -330,7 +331,7 @@ func DisjointOutput(p Pipe) (stdout []byte, stderr []byte, err error) {
 	s := NewState(outb, errb)
 	err = p(s)
 	if err == nil {
-		err = s.FlushAll()
+		err = s.RunAll()
 	}
 	return outb.Bytes(), errb.Bytes(), err
 }
@@ -362,7 +363,7 @@ func (out *OutputBuffer) Bytes() []byte {
 // Exec returns a pipe that runs the named program with the given arguments.
 func Exec(name string, args ...string) Pipe {
 	return func(s *State) error {
-		s.AddFlusher(&execFlusher{name, args, make(chan *os.Process, 1)})
+		s.AddTask(&execTask{name, args, make(chan *os.Process, 1)})
 		return nil
 	}
 }
@@ -373,13 +374,13 @@ func System(cmd string) Pipe {
 	return Exec("/bin/sh", "-c", cmd)
 }
 
-type execFlusher struct {
+type execTask struct {
 	name string
 	args []string
 	ch   chan *os.Process
 }
 
-func (f *execFlusher) Flush(s *State) error {
+func (f *execTask) Run(s *State) error {
 	cmd := exec.Command(f.name, f.args...)
 	cmd.Dir = s.Dir
 	cmd.Env = s.Env
@@ -406,7 +407,7 @@ func (e *execError) Error() string {
 	return fmt.Sprintf("command %q: %v", e.name, e.err)
 }
 
-func (f *execFlusher) Kill() {
+func (f *execTask) Kill() {
 	if p := <-f.ch; p != nil {
 		p.Kill()
 	}
@@ -475,26 +476,26 @@ func Line(p ...Pipe) Pipe {
 				closeOut = &refCloser{w, 1}
 			}
 
-			oldLen := len(s.pendingFlushes)
+			oldLen := len(s.pendingTasks)
 			if err := p(s); err != nil {
 				closeIn.Close()
 				return err
 			}
-			newLen := len(s.pendingFlushes)
+			newLen := len(s.pendingTasks)
 
 			for fi := oldLen; fi < newLen; fi++ {
-				pf := s.pendingFlushes[fi]
-				if c, ok := pf.s.Stdin.(io.Closer); ok && closeIn.uses(c) {
+				pt := s.pendingTasks[fi]
+				if c, ok := pt.s.Stdin.(io.Closer); ok && closeIn.uses(c) {
 					closeIn.refs++
-					pf.closeWhenDone(closeIn)
+					pt.closeWhenDone(closeIn)
 				}
-				if c, ok := pf.s.Stdout.(io.Closer); ok && closeOut.uses(c) {
+				if c, ok := pt.s.Stdout.(io.Closer); ok && closeOut.uses(c) {
 					closeOut.refs++
-					pf.closeWhenDone(closeOut)
+					pt.closeWhenDone(closeOut)
 				}
-				if c, ok := pf.s.Stderr.(io.Closer); ok && closeOut.uses(c) {
+				if c, ok := pt.s.Stderr.(io.Closer); ok && closeOut.uses(c) {
 					closeOut.refs++
-					pf.closeWhenDone(closeOut)
+					pt.closeWhenDone(closeOut)
 				}
 			}
 			closeIn.Close()
@@ -535,13 +536,13 @@ func Script(p ...Pipe) Pipe {
 			s.Env = saved.Env
 		}()
 
-		startLen := len(s.pendingFlushes)
+		startLen := len(s.pendingTasks)
 		for _, p := range p {
-			oldLen := len(s.pendingFlushes)
+			oldLen := len(s.pendingTasks)
 			if err := p(s); err != nil {
 				return err
 			}
-			newLen := len(s.pendingFlushes)
+			newLen := len(s.pendingTasks)
 
 			s.Stdin = saved.Stdin
 			s.Stdout = saved.Stdout
@@ -549,7 +550,7 @@ func Script(p ...Pipe) Pipe {
 
 			for fi := oldLen; fi < newLen; fi++ {
 				for wi := startLen; wi < oldLen; wi++ {
-					s.pendingFlushes[fi].waitFor(s.pendingFlushes[wi])
+					s.pendingTasks[fi].waitFor(s.pendingTasks[wi])
 				}
 			}
 		}
@@ -557,16 +558,16 @@ func Script(p ...Pipe) Pipe {
 	}
 }
 
-type flushFunc func(s *State) error
+type taskFunc func(s *State) error
 
-func (f flushFunc) Flush(s *State) error { return f(s) }
-func (f flushFunc) Kill()                {}
+func (f taskFunc) Run(s *State) error { return f(s) }
+func (f taskFunc) Kill()              {}
 
-// FlushFunc is a helper to define a Pipe that adds a Flusher
-// with f as its Flush method.
-func FlushFunc(f func(s *State) error) Pipe {
+// TaskFunc is a helper to define a Pipe that adds a Task
+// with f as its Run method.
+func TaskFunc(f func(s *State) error) Pipe {
 	return func(s *State) error {
-		s.AddFlusher(flushFunc(f))
+		s.AddTask(taskFunc(f))
 		return nil
 	}
 }
@@ -574,7 +575,7 @@ func FlushFunc(f func(s *State) error) Pipe {
 // Print provides args to fmt.Sprint and writes the resuling
 // string to the pipe's stdout.
 func Print(args ...interface{}) Pipe {
-	return FlushFunc(func(s *State) error {
+	return TaskFunc(func(s *State) error {
 		_, err := s.Stdout.Write([]byte(fmt.Sprint(args...)))
 		return err
 	})
@@ -583,7 +584,7 @@ func Print(args ...interface{}) Pipe {
 // Println provides args to fmt.Sprintln and writes the resuling
 // string to the pipe's stdout.
 func Println(args ...interface{}) Pipe {
-	return FlushFunc(func(s *State) error {
+	return TaskFunc(func(s *State) error {
 		_, err := s.Stdout.Write([]byte(fmt.Sprintln(args...)))
 		return err
 	})
@@ -592,7 +593,7 @@ func Println(args ...interface{}) Pipe {
 // Printf provides format and args to fmt.Sprintf and writes
 // the resulting string to the pipe's stdout.
 func Printf(format string, args ...interface{}) Pipe {
-	return FlushFunc(func(s *State) error {
+	return TaskFunc(func(s *State) error {
 		_, err := s.Stdout.Write([]byte(fmt.Sprintf(format, args...)))
 		return err
 	})
@@ -600,7 +601,7 @@ func Printf(format string, args ...interface{}) Pipe {
 
 // Read reads data from r and writes it to the pipe's stdout.
 func Read(r io.Reader) Pipe {
-	return FlushFunc(func(s *State) error {
+	return TaskFunc(func(s *State) error {
 		_, err := io.Copy(s.Stdout, r)
 		return err
 	})
@@ -608,7 +609,7 @@ func Read(r io.Reader) Pipe {
 
 // Write writes to w the data read from the pipe's stdin.
 func Write(w io.Writer) Pipe {
-	return FlushFunc(func(s *State) error {
+	return TaskFunc(func(s *State) error {
 		_, err := io.Copy(w, s.Stdin)
 		return err
 	})
@@ -622,7 +623,7 @@ func Discard() Pipe {
 // Tee reads data from the pipe's stdin and writes it both to
 // the pipe's stdout and to w.
 func Tee(w io.Writer) Pipe {
-	return FlushFunc(func(s *State) error {
+	return TaskFunc(func(s *State) error {
 		_, err := io.Copy(w, io.TeeReader(s.Stdin, s.Stdout))
 		return err
 	})
@@ -631,7 +632,7 @@ func Tee(w io.Writer) Pipe {
 // ReadFile reads data from the file at path and writes it to the
 // pipe's stdout.
 func ReadFile(path string) Pipe {
-	return FlushFunc(func(s *State) error {
+	return TaskFunc(func(s *State) error {
 		file, err := os.Open(s.Path(path))
 		if err != nil {
 			return err
@@ -645,7 +646,7 @@ func ReadFile(path string) Pipe {
 // WriteFile writes to the file at path the data read from the
 // pipe's stdin. If the file doesn't exist, it is created with perm.
 func WriteFile(path string, perm os.FileMode) Pipe {
-	return FlushFunc(func(s *State) error {
+	return TaskFunc(func(s *State) error {
 		file, err := os.OpenFile(s.Path(path), os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
 		if err != nil {
 			return err
@@ -659,7 +660,7 @@ func WriteFile(path string, perm os.FileMode) Pipe {
 // from the pipe's stdin. If the file doesn't exist, it is created
 // with perm.
 func AppendFile(path string, perm os.FileMode) Pipe {
-	return FlushFunc(func(s *State) error {
+	return TaskFunc(func(s *State) error {
 		file, err := os.OpenFile(s.Path(path), os.O_WRONLY|os.O_CREATE|os.O_APPEND, perm)
 		if err != nil {
 			return err
@@ -673,7 +674,7 @@ func AppendFile(path string, perm os.FileMode) Pipe {
 // the pipe's stdout and to the file at path. If the file doesn't
 // exist, it is created with perm.
 func TeeFile(path string, perm os.FileMode) Pipe {
-	return FlushFunc(func(s *State) error {
+	return TaskFunc(func(s *State) error {
 		file, err := os.OpenFile(s.Path(path), os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
 		if err != nil {
 			return err
@@ -687,7 +688,7 @@ func TeeFile(path string, perm os.FileMode) Pipe {
 // for which f is true are written to the pipe's stdout.
 // The line provided to f has '\n' and '\r' trimmed.
 func Filter(f func(line string) bool) Pipe {
-	return FlushFunc(func(s *State) error {
+	return TaskFunc(func(s *State) error {
 		r := bufio.NewReader(s.Stdin)
 		for {
 			line, err := r.ReadBytes('\n')
