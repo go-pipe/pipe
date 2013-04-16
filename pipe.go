@@ -1,18 +1,18 @@
 // pipe - Unix-like pipelines for Go
-// 
-// Copyright (c) 2010-2012 - Gustavo Niemeyer <gustavo@niemeyer.net>
-// 
+//
+// Copyright (c) 2013 - Gustavo Niemeyer <gustavo@niemeyer.net>
+//
 // All rights reserved.
 //
 // Redistribution and use in source and binary forms, with or without
-// modification, are permitted provided that the following conditions are met: 
-// 
+// modification, are permitted provided that the following conditions are met:
+//
 // 1. Redistributions of source code must retain the above copyright notice, this
-//    list of conditions and the following disclaimer. 
+//    list of conditions and the following disclaimer.
 // 2. Redistributions in binary form must reproduce the above copyright notice,
 //    this list of conditions and the following disclaimer in the documentation
-//    and/or other materials provided with the distribution. 
-// 
+//    and/or other materials provided with the distribution.
+//
 // THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
 // ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
 // WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
@@ -44,6 +44,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 )
 
 // Pipe functions implement arbitrary functionality that may be
@@ -123,6 +124,8 @@ type pendingFlush struct {
 
 	wg sync.WaitGroup
 	wf []*pendingFlush
+
+	cancel int32
 }
 
 func (pf *pendingFlush) closeWhenDone(c io.Closer) {
@@ -138,13 +141,26 @@ func (pf *pendingFlush) wait() {
 	pf.wg.Wait()
 }
 
-func (pf *pendingFlush) done() {
+func (pf *pendingFlush) done(err error) {
 	for _, c := range pf.c {
 		c.Close()
 	}
 	for _, wf := range pf.wf {
+		if err != nil {
+			atomic.AddInt32(&wf.cancel, 1)
+		}
 		wf.wg.Done()
 	}
+}
+
+type Errors []error
+
+func (e Errors) Error() string {
+	var errors []string
+	for _, err := range e {
+		errors = append(errors, err.Error())
+	}
+	return strings.Join(errors, "; ")
 }
 
 // AddFlusher adds f to be flushed concurrently with other
@@ -164,23 +180,60 @@ func (s *State) FlushAll() error {
 	for _, f := range s.pendingFlushes {
 		go func(pf *pendingFlush) {
 			pf.wait()
-			err := pf.f.Flush(&pf.s)
-			pf.done()
+			var err error
+			if pf.cancel == 0 {
+				err = pf.f.Flush(&pf.s)
+			}
+			pf.done(err)
 			done <- err
 		}(f)
 	}
-	var first error
+	var errs Errors
+	var goodErr, badErr bool
 	for _ = range s.pendingFlushes {
 		err := <-done
-		if err != nil && first == nil {
-			first = err
-			for _, pf := range s.pendingFlushes {
-				pf.f.Kill()
+		if err != nil {
+			if errs == nil {
+				for _, pf := range s.pendingFlushes {
+					pf.f.Kill()
+				}
+			}
+			errs = append(errs, err)
+			if discardErr(err) {
+				badErr = true
+			} else {
+				goodErr = true
 			}
 		}
 	}
 	s.pendingFlushes = nil
-	return first
+	if errs == nil {
+		return nil
+	}
+	if goodErr && badErr {
+		good := 0
+		for _, err := range errs {
+			if !discardErr(err) {
+				errs[good] = err
+				good++
+			}
+		}
+		errs = errs[:good]
+	}
+	return errs
+}
+
+func discardErr(err error) bool {
+	if err == io.ErrClosedPipe {
+		return true
+	}
+	if err1, ok := err.(*execError); ok {
+		if err2, ok := err1.err.(*exec.ExitError); ok {
+			status, ok := err2.Sys().(syscall.WaitStatus)
+			return ok && status.Signaled() && status.Signal() == 9
+		}
+	}
+	return false
 }
 
 // EnvVar returns the value for the named environment variable in s.
@@ -339,9 +392,18 @@ func (f *execFlusher) Flush(s *State) error {
 		return err
 	}
 	if err := cmd.Wait(); err != nil {
-		return fmt.Errorf("command %q: %v", f.name, err)
+		return &execError{f.name, err}
 	}
 	return nil
+}
+
+type execError struct {
+	name string
+	err  error
+}
+
+func (e *execError) Error() string {
+	return fmt.Sprintf("command %q: %v", e.name, e.err)
 }
 
 func (f *execFlusher) Kill() {

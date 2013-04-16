@@ -125,6 +125,28 @@ func (S) TestScriptCombinedOutput(c *C) {
 	c.Assert(string(output), Equals, "out1\nerr1\nout2\nerr2\nout3\nerr3\nout4\nerr4\n")
 }
 
+func (S) TestErrorHandling(c *C) {
+	sync := make(chan bool)
+	p := pipe.Script(
+		pipe.Line(
+			pipe.FlushFunc(func(*pipe.State) error {
+				sync <- true
+				return fmt.Errorf("err1")
+			}),
+			pipe.FlushFunc(func(*pipe.State) error {
+				<-sync
+				return fmt.Errorf("err2")
+			}),
+		),
+		pipe.Print("never happened"),
+	)
+	output, err := pipe.Output(p)
+	if err.Error() != "err1; err2" && err.Error() != "err2; err1" {
+		c.Fatalf(`want "err1; err2" or "err2; err1"; got %q`, err.Error())
+	}
+	c.Assert(string(output), Equals, "")
+}
+
 func (S) TestSetEnvVar(c *C) {
 	os.Setenv("PIPE_NEW_VAR", "")
 	os.Setenv("PIPE_OLD_VAR", "old")
