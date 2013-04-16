@@ -63,9 +63,9 @@ func (S) TestExecCombinedOutput(c *C) {
 	c.Assert(string(output), Equals, "out1\nerr1\nout2\nerr2\n")
 }
 
-func (S) TestExecDisjointOutput(c *C) {
+func (S) TestExecDividedOutput(c *C) {
 	p := pipe.Exec("/bin/sh", "-c", "echo out1; echo err1 1>&2; echo out2; echo err2 1>&2")
-	stdout, stderr, err := pipe.DisjointOutput(p)
+	stdout, stderr, err := pipe.DividedOutput(p)
 	c.Assert(err, IsNil)
 	c.Assert(string(stdout), Equals, "out1\nout2\n")
 	c.Assert(string(stderr), Equals, "err1\nerr2\n")
@@ -73,7 +73,7 @@ func (S) TestExecDisjointOutput(c *C) {
 
 func (S) TestSystem(c *C) {
 	p := pipe.System("echo out1; echo err1 1>&2; echo out2; echo err2 1>&2")
-	stdout, stderr, err := pipe.DisjointOutput(p)
+	stdout, stderr, err := pipe.DividedOutput(p)
 	c.Assert(err, IsNil)
 	c.Assert(string(stdout), Equals, "out1\nout2\n")
 	c.Assert(string(stderr), Equals, "err1\nerr2\n")

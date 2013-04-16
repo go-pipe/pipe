@@ -285,7 +285,7 @@ func firstErr(err1, err2 error) error {
 
 // Run runs the p pipe discarding its output.
 //
-// See functions Output, CombinedOutput, and DisjointOutput.
+// See functions Output, CombinedOutput, and DividedOutput.
 func Run(p Pipe) error {
 	s := NewState(nil, nil)
 	err := p(s)
@@ -297,7 +297,7 @@ func Run(p Pipe) error {
 
 // Output runs the p pipe and returns its stdout output.
 //
-// See functions Run, CombinedOutput, and DisjointOutput.
+// See functions Run, CombinedOutput, and DividedOutput.
 func Output(p Pipe) ([]byte, error) {
 	outb := &OutputBuffer{}
 	s := NewState(outb, nil)
@@ -311,7 +311,7 @@ func Output(p Pipe) ([]byte, error) {
 // CombinedOutput runs the p pipe and returns its stdout and stderr
 // outputs merged together.
 //
-// See functions Run, Output, and DisjointOutput.
+// See functions Run, Output, and DividedOutput.
 func CombinedOutput(p Pipe) ([]byte, error) {
 	outb := &OutputBuffer{}
 	s := NewState(outb, outb)
@@ -322,10 +322,10 @@ func CombinedOutput(p Pipe) ([]byte, error) {
 	return outb.Bytes(), err
 }
 
-// DisjointOutput runs the p pipe and returns its stdout and stderr outputs.
+// DividedOutput runs the p pipe and returns its stdout and stderr outputs.
 //
 // See functions Run, Output, and CombinedOutput..
-func DisjointOutput(p Pipe) (stdout []byte, stderr []byte, err error) {
+func DividedOutput(p Pipe) (stdout []byte, stderr []byte, err error) {
 	outb := &OutputBuffer{}
 	errb := &OutputBuffer{}
 	s := NewState(outb, errb)
