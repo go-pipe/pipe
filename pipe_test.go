@@ -236,7 +236,7 @@ func (S) TestLineNesting(c *C) {
 	p := pipe.Line(
 		pipe.Print("hello"),
 		pipe.Line(
-			pipe.Filter(func(line string) bool { return true }),
+			pipe.Filter(func(line []byte) bool { return true }),
 			pipe.Exec("sed", "s/l/k/g"),
 		),
 		pipe.Write(b),
@@ -590,7 +590,7 @@ func (S) TestTeeFileMode(c *C) {
 func (S) TestFilter(c *C) {
 	p := pipe.Line(
 		pipe.System("echo out1; echo err1 1>&2; echo out2; echo err2 1>&2; echo out3"),
-		pipe.Filter(func(line string) bool { return line != "out2" }),
+		pipe.Filter(func(line []byte) bool { return string(line) != "out2" }),
 	)
 	output, err := pipe.Output(p)
 	c.Assert(err, IsNil)
@@ -600,9 +600,45 @@ func (S) TestFilter(c *C) {
 func (S) TestFilterNoNewLine(c *C) {
 	p := pipe.Line(
 		pipe.Print("out1\nout2\nout3"),
-		pipe.Filter(func(line string) bool { return line != "out2" }),
+		pipe.Filter(func(line []byte) bool { return string(line) != "out2" }),
 	)
 	output, err := pipe.Output(p)
 	c.Assert(err, IsNil)
 	c.Assert(string(output), Equals, "out1\nout3")
+}
+
+func (S) TestReplace(c *C) {
+	p := pipe.Line(
+		pipe.System("echo out1; echo err1 1>&2; echo out2; echo err2 1>&2; echo out3"),
+		pipe.Replace(func(line []byte) []byte {
+			if bytes.HasPrefix(line, []byte("out")) {
+				if line[3] == '3' {
+					return nil
+				}
+				return []byte{'l', line[3], ','}
+			}
+			return line
+		}),
+	)
+	output, err := pipe.Output(p)
+	c.Assert(err, IsNil)
+	c.Assert(string(output), Equals, "l1,l2,")
+}
+
+func (S) TestReplaceNoNewLine(c *C) {
+	p := pipe.Line(
+		pipe.Print("out1\nout2\nout3"),
+		pipe.Replace(func(line []byte) []byte {
+			if bytes.HasPrefix(line, []byte("out")) {
+				if line[3] == '2' {
+					return nil
+				}
+				return []byte{'l', line[3], ','}
+			}
+			return line
+		}),
+	)
+	output, err := pipe.Output(p)
+	c.Assert(err, IsNil)
+	c.Assert(string(output), Equals, "l1,l3,")
 }

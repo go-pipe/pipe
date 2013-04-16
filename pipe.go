@@ -684,32 +684,41 @@ func TeeFile(path string, perm os.FileMode) Pipe {
 	})
 }
 
-// Filter filters lines read from the pipe's stdin so that only those
-// for which f is true are written to the pipe's stdout.
-// The line provided to f has '\n' and '\r' trimmed.
-func Filter(f func(line string) bool) Pipe {
+// Replace filters lines read from the pipe's stdin and writes
+// the returned values to stdout.
+func Replace(f func(line []byte) []byte) Pipe {
 	return TaskFunc(func(s *State) error {
 		r := bufio.NewReader(s.Stdin)
 		for {
 			line, err := r.ReadBytes('\n')
-			eof := err == io.EOF
-			if eof {
-				if len(line) == 0 {
+			if len(line) > 0 {
+				line := f(line)
+				if len(line) > 0 {
+					_, err := s.Stdout.Write(line)
+					if err != nil {
+						return err
+					}
+				}
+			}
+			if err != nil {
+				if err == io.EOF {
 					return nil
 				}
-			} else if err != nil {
 				return err
-			}
-			if f(string(bytes.TrimRight(line, "\r\n"))) {
-				_, err := s.Stdout.Write(line)
-				if err != nil {
-					return err
-				}
-			}
-			if eof {
-				return nil
 			}
 		}
 		panic("unreachable")
+	})
+}
+
+// Filter filters lines read from the pipe's stdin so that only those
+// for which f is true are written to the pipe's stdout.
+// The line provided to f has '\n' and '\r' trimmed.
+func Filter(f func(line []byte) bool) Pipe {
+	return Replace(func(line []byte) []byte {
+		if f(bytes.TrimRight(line, "\r\n")) {
+			return line
+		}
+		return nil
 	})
 }
