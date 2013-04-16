@@ -657,5 +657,6 @@ func Filter(f func(line string) bool) Pipe {
 				return nil
 			}
 		}
+		panic("unreachable")
 	})
 }
