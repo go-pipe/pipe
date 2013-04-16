@@ -590,6 +590,20 @@ func WriteFile(path string, perm os.FileMode) Pipe {
 	})
 }
 
+// AppendFile append to the end of the file at path the data read
+// from the pipe's stdin. If the file doesn't exist, it is created
+// with perm.
+func AppendFile(path string, perm os.FileMode) Pipe {
+	return FlushFunc(func(s *State) error {
+		file, err := os.OpenFile(s.Path(path), os.O_WRONLY|os.O_CREATE|os.O_APPEND, perm)
+		if err != nil {
+			return err
+		}
+		_, err = io.Copy(file, s.Stdin)
+		return firstErr(err, file.Close())
+	})
+}
+
 // TeeFile reads data from the pipe's stdin and writes it both to
 // the pipe's stdout and to the file at path. If the file doesn't
 // exist, it is created with perm.

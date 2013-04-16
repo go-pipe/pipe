@@ -447,6 +447,61 @@ func (S) TestWriteFileMode(c *C) {
 	c.Assert(stat.Mode()&os.ModePerm, Equals, os.FileMode(0600))
 }
 
+func (S) TestAppendFileAbsolute(c *C) {
+	path := filepath.Join(c.MkDir(), "file")
+	p := pipe.Script(
+		pipe.Line(
+			pipe.Echo("hello "),
+			pipe.AppendFile(path, 0600),
+		),
+		pipe.Line(
+			pipe.Echo("world!"),
+			pipe.AppendFile(path, 0600),
+		),
+	)
+	output, err := pipe.Output(p)
+	c.Assert(err, IsNil)
+	c.Assert(string(output), Equals, "")
+
+	data, err := ioutil.ReadFile(path)
+	c.Assert(err, IsNil)
+	c.Assert(string(data), Equals, "hello world!")
+}
+
+func (S) TestAppendFileRelative(c *C) {
+	dir := c.MkDir()
+	path := filepath.Join(dir, "file")
+	p := pipe.Script(
+		pipe.ChDir(dir),
+		pipe.Line(
+			pipe.Echo("hello "),
+			pipe.AppendFile("file", 0600),
+		),
+		pipe.Line(
+			pipe.Echo("world!"),
+			pipe.AppendFile("file", 0600),
+		),
+	)
+	output, err := pipe.Output(p)
+	c.Assert(err, IsNil)
+	c.Assert(string(output), Equals, "")
+
+	data, err := ioutil.ReadFile(path)
+	c.Assert(err, IsNil)
+	c.Assert(string(data), Equals, "hello world!")
+}
+
+func (S) TestAppendFileMode(c *C) {
+	path := filepath.Join(c.MkDir(), "file")
+	p := pipe.AppendFile(path, 0600)
+	_, err := pipe.Output(p)
+	c.Assert(err, IsNil)
+
+	stat, err := os.Stat(path)
+	c.Assert(err, IsNil)
+	c.Assert(stat.Mode()&os.ModePerm, Equals, os.FileMode(0600))
+}
+
 func (S) TestTeeFileAbsolute(c *C) {
 	path := filepath.Join(c.MkDir(), "file")
 	p := pipe.Line(
