@@ -125,28 +125,6 @@ func (S) TestScriptCombinedOutput(c *C) {
 	c.Assert(string(output), Equals, "out1\nerr1\nout2\nerr2\nout3\nerr3\nout4\nerr4\n")
 }
 
-func (S) TestCombineToErr(c *C) {
-	p := pipe.Script(
-		pipe.CombineToErr(),
-		pipe.System("echo out1; echo err1 1>&2; echo out2; echo err2 1>&2"),
-	)
-	stdout, stderr, err := pipe.DisjointOutput(p)
-	c.Assert(err, IsNil)
-	c.Assert(string(stdout), Equals, "")
-	c.Assert(string(stderr), Equals, "out1\nerr1\nout2\nerr2\n")
-}
-
-func (S) TestCombineToOut(c *C) {
-	p := pipe.Script(
-		pipe.CombineToOut(),
-		pipe.System("echo out1; echo err1 1>&2; echo out2; echo err2 1>&2"),
-	)
-	stdout, stderr, err := pipe.DisjointOutput(p)
-	c.Assert(err, IsNil)
-	c.Assert(string(stdout), Equals, "out1\nerr1\nout2\nerr2\n")
-	c.Assert(string(stderr), Equals, "")
-}
-
 func (S) TestSetEnvVar(c *C) {
 	os.Setenv("PIPE_NEW_VAR", "")
 	os.Setenv("PIPE_OLD_VAR", "old")

@@ -382,26 +382,6 @@ func SetEnvVar(name string, value string) Pipe {
 	}
 }
 
-// CombineToErr modifes the stdout stream in the pipe so it is the same
-// as the stderr stream. As a consequence, all further stdout output
-// will be written to the stderr stream.
-func CombineToErr() Pipe {
-	return func(s *State) error {
-		s.Stdout = s.Stderr
-		return nil
-	}
-}
-
-// CombineToOut modifes the stderr stream in the pipe so it is the same
-// as the stdout stream. As a consequence, all further stderr output
-// will be written to the stdout stream.
-func CombineToOut() Pipe {
-	return func(s *State) error {
-		s.Stderr = s.Stdout
-		return nil
-	}
-}
-
 // Line creates a pipeline with the provided entries. The stdout of entry
 // N in the pipeline is connected to the stdin of entry N+1.
 // Entries are run sequentially, but flushed concurrently.
