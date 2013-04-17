@@ -173,10 +173,10 @@ func (s *State) AddTask(t Task) error {
 	return nil
 }
 
-// RunAll runs all pending flushers registered via AddTask.
+// RunTasks runs all pending tasks registered via AddTask.
 // This is called by the pipe running functions and generally
 // there's no reason to call it directly.
-func (s *State) RunAll() error {
+func (s *State) RunTasks() error {
 	done := make(chan error, len(s.pendingTasks))
 	for _, f := range s.pendingTasks {
 		go func(pt *pendingTask) {
@@ -290,7 +290,7 @@ func Run(p Pipe) error {
 	s := NewState(nil, nil)
 	err := p(s)
 	if err == nil {
-		err = s.RunAll()
+		err = s.RunTasks()
 	}
 	return err
 }
@@ -303,7 +303,7 @@ func Output(p Pipe) ([]byte, error) {
 	s := NewState(outb, nil)
 	err := p(s)
 	if err == nil {
-		err = s.RunAll()
+		err = s.RunTasks()
 	}
 	return outb.Bytes(), err
 }
@@ -317,7 +317,7 @@ func CombinedOutput(p Pipe) ([]byte, error) {
 	s := NewState(outb, outb)
 	err := p(s)
 	if err == nil {
-		err = s.RunAll()
+		err = s.RunTasks()
 	}
 	return outb.Bytes(), err
 }
@@ -331,7 +331,7 @@ func DividedOutput(p Pipe) (stdout []byte, stderr []byte, err error) {
 	s := NewState(outb, errb)
 	err = p(s)
 	if err == nil {
-		err = s.RunAll()
+		err = s.RunTasks()
 	}
 	return outb.Bytes(), errb.Bytes(), err
 }
@@ -733,5 +733,14 @@ func Filter(f func(line []byte) bool) Pipe {
 			return line
 		}
 		return nil
+	})
+}
+
+// RenameFile renames the file fromPath as toPath.
+func RenameFile(fromPath, toPath string) Pipe {
+	// Register it as a task function so that within scripts
+	// it holds until all the preceding flushing is done.
+	return TaskFunc(func(s *State) error {
+		return os.Rename(s.Path(fromPath), s.Path(toPath))
 	})
 }

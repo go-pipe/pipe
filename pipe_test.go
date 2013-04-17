@@ -651,3 +651,38 @@ func (S) TestKillAbortedExecTask(c *C) {
 	_, err := pipe.Output(p)
 	c.Assert(err, ErrorMatches, "boom")
 }
+
+func (S) TestRenameFileAbsolute(c *C) {
+	dir := c.MkDir()
+	from := filepath.Join(dir, "from")
+	to := filepath.Join(dir, "to")
+	p := pipe.Script(
+		pipe.WriteFile(from, 0644),
+		pipe.RenameFile(from, to),
+	)
+	err := pipe.Run(p)
+	c.Assert(err, IsNil)
+
+	_, err = os.Stat(from)
+	c.Assert(err, NotNil)
+	_, err = os.Stat(to)
+	c.Assert(err, IsNil)
+}
+
+func (S) TestRenameFileRelative(c *C) {
+	dir := c.MkDir()
+	from := filepath.Join(dir, "from")
+	to := filepath.Join(dir, "to")
+	p := pipe.Script(
+		pipe.ChDir(dir),
+		pipe.WriteFile("from", 0644),
+		pipe.RenameFile("from", "to"),
+	)
+	err := pipe.Run(p)
+	c.Assert(err, IsNil)
+
+	_, err = os.Stat(from)
+	c.Assert(err, NotNil)
+	_, err = os.Stat(to)
+	c.Assert(err, IsNil)
+}
