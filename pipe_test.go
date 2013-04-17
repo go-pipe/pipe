@@ -642,3 +642,12 @@ func (S) TestReplaceNoNewLine(c *C) {
 	c.Assert(err, IsNil)
 	c.Assert(string(output), Equals, "l1,l3,")
 }
+
+func (S) TestKillAbortedExecTask(c *C) {
+	p := pipe.Script(
+		pipe.TaskFunc(func(*pipe.State) error { return fmt.Errorf("boom") }),
+		pipe.Exec("will-not-run"),
+	)
+	_, err := pipe.Output(p)
+	c.Assert(err, ErrorMatches, "boom")
+}

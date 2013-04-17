@@ -363,7 +363,7 @@ func (out *OutputBuffer) Bytes() []byte {
 // Exec returns a pipe that runs the named program with the given arguments.
 func Exec(name string, args ...string) Pipe {
 	return func(s *State) error {
-		s.AddTask(&execTask{name, args, make(chan *os.Process, 1)})
+		s.AddTask(&execTask{name: name, args: args})
 		return nil
 	}
 }
@@ -375,12 +375,20 @@ func System(cmd string) Pipe {
 }
 
 type execTask struct {
-	name string
-	args []string
-	ch   chan *os.Process
+	name  string
+	args  []string
+
+	m      sync.Mutex
+	p      *os.Process
+	cancel bool
 }
 
 func (f *execTask) Run(s *State) error {
+	f.m.Lock()
+	if f.cancel {
+		f.m.Unlock()
+		return nil
+	}
 	cmd := exec.Command(f.name, f.args...)
 	cmd.Dir = s.Dir
 	cmd.Env = s.Env
@@ -388,7 +396,8 @@ func (f *execTask) Run(s *State) error {
 	cmd.Stdout = s.Stdout
 	cmd.Stderr = s.Stderr
 	err := cmd.Start()
-	f.ch <- cmd.Process
+	f.p = cmd.Process
+	f.m.Unlock()
 	if err != nil {
 		return err
 	}
@@ -398,6 +407,16 @@ func (f *execTask) Run(s *State) error {
 	return nil
 }
 
+func (f *execTask) Kill() {
+	f.m.Lock()
+	p := f.p
+	f.cancel = true
+	f.m.Unlock()
+	if p != nil {
+		p.Kill()
+	}
+}
+
 type execError struct {
 	name string
 	err  error
@@ -405,12 +424,6 @@ type execError struct {
 
 func (e *execError) Error() string {
 	return fmt.Sprintf("command %q: %v", e.name, e.err)
-}
-
-func (f *execTask) Kill() {
-	if p := <-f.ch; p != nil {
-		p.Kill()
-	}
 }
 
 // ChDir changes the pipe's current directory. If dir is relative,
