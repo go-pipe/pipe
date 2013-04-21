@@ -447,6 +447,15 @@ func MkDir(dir string, perm os.FileMode) Pipe {
 	}
 }
 
+// MkDirAll creates the missing parents of dir and dir itself with the
+// provided perm bits. If dir is relative, the created path is relative
+// to the pipe's current directory.
+func MkDirAll(dir string, perm os.FileMode) Pipe {
+	return func(s *State) error {
+		return os.MkdirAll(s.Path(dir), perm)
+	}
+}
+
 // SetEnvVar sets the value of the named environment variable in the pipe.
 //
 // Other than it being the default for new pipes, the environment of the
@@ -683,12 +692,26 @@ func AppendFile(path string, perm os.FileMode) Pipe {
 	})
 }
 
-// TeeFile reads data from the pipe's stdin and writes it both to
+// TeeWriteFile reads data from the pipe's stdin and writes it both to
 // the pipe's stdout and to the file at path. If the file doesn't
 // exist, it is created with perm.
-func TeeFile(path string, perm os.FileMode) Pipe {
+func TeeWriteFile(path string, perm os.FileMode) Pipe {
 	return TaskFunc(func(s *State) error {
 		file, err := os.OpenFile(s.Path(path), os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
+		if err != nil {
+			return err
+		}
+		_, err = io.Copy(file, io.TeeReader(s.Stdin, s.Stdout))
+		return firstErr(err, file.Close())
+	})
+}
+
+// TeeAppendFile reads data from the pipe's stdin and writes it both to
+// the pipe's stdout and to the file at path. If the file doesn't
+// exist, it is created with perm.
+func TeeAppendFile(path string, perm os.FileMode) Pipe {
+	return TaskFunc(func(s *State) error {
+		file, err := os.OpenFile(s.Path(path), os.O_WRONLY|os.O_CREATE|os.O_APPEND, perm)
 		if err != nil {
 			return err
 		}

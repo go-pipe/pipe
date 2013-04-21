@@ -300,9 +300,9 @@ func (S) TestMkDir(c *C) {
 	subdir := filepath.Join(dir, "subdir")
 	subsubdir := filepath.Join(subdir, "subsubdir")
 	p := pipe.Script(
-		pipe.MkDir(subdir, 0755),
+		pipe.MkDir(subdir, 0755), // Absolute
 		pipe.ChDir(subdir),
-		pipe.MkDir("subsubdir", 0700),
+		pipe.MkDir("subsubdir", 0700), // Relative
 		pipe.ChDir("subsubdir"),
 		pipe.System("echo $PWD"),
 	)
@@ -311,6 +311,29 @@ func (S) TestMkDir(c *C) {
 	c.Assert(string(output), Equals, subsubdir+"\n")
 
 	stat, err := os.Stat(subsubdir)
+	c.Assert(err, IsNil)
+	c.Assert(stat.Mode()&os.ModePerm, Equals, os.FileMode(0700))
+}
+
+func (S) TestMkDirAll(c *C) {
+	dir := c.MkDir()
+	subdir := filepath.Join(dir, "subdir")
+	subsubdir := filepath.Join(subdir, "subsubdir")
+	subsubsubdir := filepath.Join(subsubdir, "subsubsubdir")
+	p := pipe.Script(
+		pipe.MkDirAll(subsubdir, 0755), // Absolute
+		pipe.MkDirAll(subsubdir, 0755),
+		pipe.ChDir(subsubdir),
+		pipe.MkDirAll("subsubsubdir", 0700), // Relative
+		pipe.MkDirAll("subsubsubdir", 0755),
+		pipe.ChDir("subsubsubdir"),
+		pipe.System("echo $PWD"),
+	)
+	output, err := pipe.Output(p)
+	c.Assert(err, IsNil)
+	c.Assert(string(output), Equals, subsubsubdir+"\n")
+
+	stat, err := os.Stat(subsubsubdir)
 	c.Assert(err, IsNil)
 	c.Assert(stat.Mode()&os.ModePerm, Equals, os.FileMode(0700))
 }
@@ -535,12 +558,12 @@ func (S) TestAppendFileMode(c *C) {
 	c.Assert(stat.Mode()&os.ModePerm, Equals, os.FileMode(0600))
 }
 
-func (S) TestTeeFileAbsolute(c *C) {
+func (S) TestTeeWriteFileAbsolute(c *C) {
 	path := filepath.Join(c.MkDir(), "file")
 	p := pipe.Line(
 		pipe.Print("hello"),
 		pipe.Exec("sed", "s/l/k/g"),
-		pipe.TeeFile(path, 0600),
+		pipe.TeeWriteFile(path, 0600),
 	)
 	output, err := pipe.Output(p)
 	c.Assert(err, IsNil)
@@ -555,14 +578,14 @@ func (S) TestTeeFileAbsolute(c *C) {
 	c.Assert(stat.Mode()&os.ModePerm, Equals, os.FileMode(0600))
 }
 
-func (S) TestTeeFileRelative(c *C) {
+func (S) TestTeeWriteFileRelative(c *C) {
 	dir := c.MkDir()
 	path := filepath.Join(dir, "file")
 	p := pipe.Line(
 		pipe.ChDir(dir),
 		pipe.Print("hello"),
 		pipe.Exec("sed", "s/l/k/g"),
-		pipe.TeeFile("file", 0600),
+		pipe.TeeWriteFile("file", 0600),
 	)
 	output, err := pipe.Output(p)
 	c.Assert(err, IsNil)
@@ -573,11 +596,73 @@ func (S) TestTeeFileRelative(c *C) {
 	c.Assert(string(data), Equals, "hekko")
 }
 
-func (S) TestTeeFileMode(c *C) {
+func (S) TestTeeWriteFileMode(c *C) {
 	path := filepath.Join(c.MkDir(), "file")
 	p := pipe.Line(
 		pipe.Print("hello"),
-		pipe.TeeFile(path, 0600),
+		pipe.TeeWriteFile(path, 0600),
+	)
+	err := pipe.Run(p)
+	c.Assert(err, IsNil)
+
+	stat, err := os.Stat(path)
+	c.Assert(err, IsNil)
+	c.Assert(stat.Mode()&os.ModePerm, Equals, os.FileMode(0600))
+}
+
+func (S) TestTeeAppendFileAbsolute(c *C) {
+	path := filepath.Join(c.MkDir(), "file")
+	p := pipe.Script(
+		pipe.Line(
+			pipe.Print("hello "),
+			pipe.TeeAppendFile(path, 0600),
+		),
+		pipe.Line(
+			pipe.Print("world!"),
+			pipe.TeeAppendFile(path, 0600),
+		),
+	)
+	output, err := pipe.Output(p)
+	c.Assert(err, IsNil)
+	c.Assert(string(output), Equals, "hello world!")
+
+	data, err := ioutil.ReadFile(path)
+	c.Assert(err, IsNil)
+	c.Assert(string(data), Equals, "hello world!")
+
+	stat, err := os.Stat(path)
+	c.Assert(err, IsNil)
+	c.Assert(stat.Mode()&os.ModePerm, Equals, os.FileMode(0600))
+}
+
+func (S) TestTeeAppendFileRelative(c *C) {
+	dir := c.MkDir()
+	path := filepath.Join(dir, "file")
+	p := pipe.Script(
+		pipe.ChDir(dir),
+		pipe.Line(
+			pipe.Print("hello "),
+			pipe.TeeAppendFile("file", 0600),
+		),
+		pipe.Line(
+			pipe.Print("world!"),
+			pipe.TeeAppendFile("file", 0600),
+		),
+	)
+	output, err := pipe.Output(p)
+	c.Assert(err, IsNil)
+	c.Assert(string(output), Equals, "hello world!")
+
+	data, err := ioutil.ReadFile(path)
+	c.Assert(err, IsNil)
+	c.Assert(string(data), Equals, "hello world!")
+}
+
+func (S) TestTeeAppendFileMode(c *C) {
+	path := filepath.Join(c.MkDir(), "file")
+	p := pipe.Line(
+		pipe.Print("hello"),
+		pipe.TeeAppendFile(path, 0600),
 	)
 	err := pipe.Run(p)
 	c.Assert(err, IsNil)
