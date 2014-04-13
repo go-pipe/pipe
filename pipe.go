@@ -557,9 +557,17 @@ func SetEnvVar(name string, value string) Pipe {
 	}
 }
 
-// Line creates a pipeline with the provided entries. The stdout of entry
-// N in the pipeline is connected to the stdin of entry N+1.
-// Entries are run sequentially, but flushed concurrently.
+// Line creates a pipeline with the provided entries, where the stdout
+// of entry N in the pipeline is connected to the stdin of entry N+1.
+//
+// For example, the equivalent of "cat article.ps | lpr" is:
+//
+//    p := pipe.Line(
+//        pipe.ReadFile("article.ps"),
+//        pipe.Exec("lpr"),
+//    )   
+//    output, err := pipe.CombinedOutput(p)
+//
 func Line(p ...Pipe) Pipe {
 	return func(s *State) error {
 		dir := s.Dir
@@ -638,7 +646,18 @@ func (rc *refCloser) Close() error {
 }
 
 // Script creates a pipe sequence with the provided entries.
-// Entries are both run and flushed sequentially.
+//
+// For example, the equivalent of "cat article.ps | lpr; mv article.ps{,.done}" is:
+//
+//    p := pipe.Script(
+//        pipe.Line(
+//            pipe.ReadFile("article.ps"),
+//            pipe.Exec("lpr"),
+//        ),
+//        pipe.RenameFile("article.ps", "article.ps.done"),
+//    )   
+//    output, err := pipe.CombinedOutput(p)
+//
 func Script(p ...Pipe) Pipe {
 	return func(s *State) error {
 		saved := *s
