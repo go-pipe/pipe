@@ -35,6 +35,7 @@ package pipe
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -45,6 +46,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"syscall"
+	"time"
 )
 
 // Pipe functions implement arbitrary functionality that may be
@@ -95,6 +97,10 @@ type State struct {
 	// environmnet from the current process, and may be changed by Pipe
 	// functions.
 	Env []string
+
+	// Timeout defines the amount of time to wait before aborting running tasks.
+	// If set to zero, the pipe will not be aborted.
+	Timeout time.Duration
 
 	pendingTasks []*pendingTask
 }
@@ -154,6 +160,8 @@ func (pt *pendingTask) done(err error) {
 	}
 }
 
+var ErrTimeout = errors.New("timeout")
+
 type Errors []error
 
 func (e Errors) Error() string {
@@ -189,21 +197,38 @@ func (s *State) RunTasks() error {
 			done <- err
 		}(f)
 	}
+	var timeout <-chan time.Time
+	if s.Timeout > 0 {
+		timeout = time.After(s.Timeout)
+	}
 	var errs Errors
 	var goodErr, badErr bool
 	for _ = range s.pendingTasks {
-		err := <-done
+		var err error
+		select {
+		case err = <-done:
+		case <-timeout:
+			if errs == nil {
+				for _, pt := range s.pendingTasks {
+					pt.t.Kill()
+				}
+			}
+			errs = append(errs, ErrTimeout)
+			err = <-done
+		}
 		if err != nil {
 			if errs == nil {
 				for _, pt := range s.pendingTasks {
 					pt.t.Kill()
 				}
 			}
-			errs = append(errs, err)
-			if discardErr(err) {
-				badErr = true
-			} else {
-				goodErr = true
+			if errs == nil || errs[len(errs)-1] != ErrTimeout {
+				errs = append(errs, err)
+				if discardErr(err) {
+					badErr = true
+				} else {
+					goodErr = true
+				}
 			}
 		}
 	}
@@ -295,12 +320,43 @@ func Run(p Pipe) error {
 	return err
 }
 
+// RunTimeout runs the p pipe discarding its output.
+//
+// The pipe is killed if it takes longer to run than the provided timeout.
+//
+// See functions OutputTimeout, CombinedOutputTimeout, and DividedOutputTimeout.
+func RunTimeout(p Pipe, timeout time.Duration) error {
+	s := NewState(nil, nil)
+	s.Timeout = timeout
+	err := p(s)
+	if err == nil {
+		err = s.RunTasks()
+	}
+	return err
+}
+
 // Output runs the p pipe and returns its stdout output.
 //
 // See functions Run, CombinedOutput, and DividedOutput.
 func Output(p Pipe) ([]byte, error) {
 	outb := &OutputBuffer{}
 	s := NewState(outb, nil)
+	err := p(s)
+	if err == nil {
+		err = s.RunTasks()
+	}
+	return outb.Bytes(), err
+}
+
+// OutputTimeout runs the p pipe and returns its stdout output.
+//
+// The pipe is killed if it takes longer to run than the provided timeout.
+//
+// See functions RunTimeout, CombinedOutputTimeout, and DividedOutputTimeout.
+func OutputTimeout(p Pipe, timeout time.Duration) ([]byte, error) {
+	outb := &OutputBuffer{}
+	s := NewState(outb, nil)
+	s.Timeout = timeout
 	err := p(s)
 	if err == nil {
 		err = s.RunTasks()
@@ -322,13 +378,47 @@ func CombinedOutput(p Pipe) ([]byte, error) {
 	return outb.Bytes(), err
 }
 
+// CombinedOutputTimeout runs the p pipe and returns its stdout and stderr
+// outputs merged together.
+//
+// The pipe is killed if it takes longer to run than the provided timeout.
+//
+// See functions RunTimeout, OutputTimeout, and DividedOutputTimeout.
+func CombinedOutputTimeout(p Pipe, timeout time.Duration) ([]byte, error) {
+	outb := &OutputBuffer{}
+	s := NewState(outb, outb)
+	s.Timeout = timeout
+	err := p(s)
+	if err == nil {
+		err = s.RunTasks()
+	}
+	return outb.Bytes(), err
+}
+
 // DividedOutput runs the p pipe and returns its stdout and stderr outputs.
 //
-// See functions Run, Output, and CombinedOutput..
+// See functions Run, Output, and CombinedOutput.
 func DividedOutput(p Pipe) (stdout []byte, stderr []byte, err error) {
 	outb := &OutputBuffer{}
 	errb := &OutputBuffer{}
 	s := NewState(outb, errb)
+	err = p(s)
+	if err == nil {
+		err = s.RunTasks()
+	}
+	return outb.Bytes(), errb.Bytes(), err
+}
+
+// DividedOutputTimeout runs the p pipe and returns its stdout and stderr outputs.
+//
+// The pipe is killed if it takes longer to run than the provided timeout.
+//
+// See functions RunTimeout, OutputTimeout, and CombinedOutputTimeout.
+func DividedOutputTimeout(p Pipe, timeout time.Duration) (stdout []byte, stderr []byte, err error) {
+	outb := &OutputBuffer{}
+	errb := &OutputBuffer{}
+	s := NewState(outb, errb)
+	s.Timeout = timeout
 	err = p(s)
 	if err == nil {
 		err = s.RunTasks()
@@ -375,8 +465,8 @@ func System(cmd string) Pipe {
 }
 
 type execTask struct {
-	name  string
-	args  []string
+	name string
+	args []string
 
 	m      sync.Mutex
 	p      *os.Process

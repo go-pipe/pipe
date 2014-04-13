@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func Test(t *testing.T) {
@@ -49,9 +50,34 @@ func (S) TestExecRun(c *C) {
 	c.Assert(string(data), Equals, "hello\n")
 }
 
+func (S) TestExecRunTimeout(c *C) {
+	p := pipe.Exec("/bin/sh", "-c", "sleep 1")
+	err := pipe.RunTimeout(p, 100 * time.Millisecond)
+	c.Assert(err, ErrorMatches, "timeout")
+
+	path := filepath.Join(c.MkDir(), "file")
+	p = pipe.Exec("/bin/sh", "-c", "echo hello > "+path)
+	err = pipe.RunTimeout(p, 1 * time.Second)
+	c.Assert(err, IsNil)
+
+	data, err := ioutil.ReadFile(path)
+	c.Assert(err, IsNil)
+	c.Assert(string(data), Equals, "hello\n")
+}
 func (S) TestExecOutput(c *C) {
 	p := pipe.Exec("/bin/sh", "-c", "echo out1; echo err1 1>&2; echo out2; echo err2 1>&2")
 	output, err := pipe.Output(p)
+	c.Assert(err, IsNil)
+	c.Assert(string(output), Equals, "out1\nout2\n")
+}
+
+func (S) TestExecOutputTimeout(c *C) {
+	p := pipe.Exec("/bin/sh", "-c", "sleep 1")
+	output, err := pipe.OutputTimeout(p, 100 * time.Millisecond)
+	c.Assert(err, ErrorMatches, "timeout")
+
+	p = pipe.Exec("/bin/sh", "-c", "echo out1; echo err1 1>&2; echo out2; echo err2 1>&2")
+	output, err = pipe.OutputTimeout(p, 1 * time.Second)
 	c.Assert(err, IsNil)
 	c.Assert(string(output), Equals, "out1\nout2\n")
 }
@@ -63,9 +89,32 @@ func (S) TestExecCombinedOutput(c *C) {
 	c.Assert(string(output), Equals, "out1\nerr1\nout2\nerr2\n")
 }
 
+func (S) TestExecCombinedOutputTimeout(c *C) {
+	p := pipe.Exec("/bin/sh", "-c", "sleep 1")
+	output, err := pipe.CombinedOutputTimeout(p, 100 * time.Millisecond)
+	c.Assert(err, ErrorMatches, "timeout")
+
+	p = pipe.Exec("/bin/sh", "-c", "echo out1; echo err1 1>&2; echo out2; echo err2 1>&2")
+	output, err = pipe.CombinedOutputTimeout(p, 1 * time.Second)
+	c.Assert(err, IsNil)
+	c.Assert(string(output), Equals, "out1\nerr1\nout2\nerr2\n")
+}
+
 func (S) TestExecDividedOutput(c *C) {
 	p := pipe.Exec("/bin/sh", "-c", "echo out1; echo err1 1>&2; echo out2; echo err2 1>&2")
 	stdout, stderr, err := pipe.DividedOutput(p)
+	c.Assert(err, IsNil)
+	c.Assert(string(stdout), Equals, "out1\nout2\n")
+	c.Assert(string(stderr), Equals, "err1\nerr2\n")
+}
+
+func (S) TestExecDividedOutputTimeout(c *C) {
+	p := pipe.Exec("/bin/sh", "-c", "sleep 1")
+	stdout, stderr, err := pipe.DividedOutputTimeout(p, 100 * time.Millisecond)
+	c.Assert(err, ErrorMatches, "timeout")
+
+	p = pipe.Exec("/bin/sh", "-c", "echo out1; echo err1 1>&2; echo out2; echo err2 1>&2")
+	stdout, stderr, err = pipe.DividedOutputTimeout(p, 1 * time.Second)
 	c.Assert(err, IsNil)
 	c.Assert(string(stdout), Equals, "out1\nout2\n")
 	c.Assert(string(stderr), Equals, "err1\nerr2\n")
