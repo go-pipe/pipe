@@ -50,7 +50,7 @@ import (
 )
 
 // Pipe functions implement arbitrary functionality that may be
-// integrated with pipe scripts and pipe lines. Pipe functions
+// integrated with pipe scripts and pipelines. Pipe functions
 // must not block reading or writing to the state streams. These
 // operations must be run from a Task.
 type Pipe func(s *State) error
@@ -102,6 +102,10 @@ type State struct {
 	// If set to zero, the pipe will not be aborted.
 	Timeout time.Duration
 
+	killedMutex sync.Mutex
+	killedNoted bool
+	killed      chan bool
+
 	pendingTasks []*pendingTask
 }
 
@@ -121,6 +125,7 @@ func NewState(stdout, stderr io.Writer) *State {
 		Stdout: stdout,
 		Stderr: stderr,
 		Env:    os.Environ(),
+		killed: make(chan bool, 1),
 	}
 }
 
@@ -160,7 +165,10 @@ func (pt *pendingTask) done(err error) {
 	}
 }
 
-var ErrTimeout = errors.New("timeout")
+var (
+	ErrTimeout = errors.New("timeout")
+	ErrKilled  = errors.New("explicitly killed")
+)
 
 type Errors []error
 
@@ -181,6 +189,7 @@ func (s *State) AddTask(t Task) error {
 	return nil
 }
 
+
 // RunTasks runs all pending tasks registered via AddTask.
 // This is called by the pipe running functions and generally
 // there's no reason to call it directly.
@@ -197,45 +206,52 @@ func (s *State) RunTasks() error {
 			done <- err
 		}(f)
 	}
+
 	var timeout <-chan time.Time
 	if s.Timeout > 0 {
 		timeout = time.After(s.Timeout)
 	}
+
 	var errs Errors
 	var goodErr, badErr bool
+
+	fail := func(err error) {
+		if errs == nil {
+			for _, pt := range s.pendingTasks {
+				pt.t.Kill()
+			}
+		}
+		if errs == nil || errs[len(errs)-1] != ErrTimeout && errs[len(errs)-1] != ErrKilled {
+			errs = append(errs, err)
+			if discardErr(err) {
+				badErr = true
+			} else {
+				goodErr = true
+			}
+		}
+	}
+
 	for _ = range s.pendingTasks {
 		var err error
 		select {
 		case err = <-done:
 		case <-timeout:
-			if errs == nil {
-				for _, pt := range s.pendingTasks {
-					pt.t.Kill()
-				}
-			}
-			errs = append(errs, ErrTimeout)
+			fail(ErrTimeout)
+			err = <-done
+		case <-s.killed:
+			fail(ErrKilled)
 			err = <-done
 		}
 		if err != nil {
-			if errs == nil {
-				for _, pt := range s.pendingTasks {
-					pt.t.Kill()
-				}
-			}
-			if errs == nil || errs[len(errs)-1] != ErrTimeout {
-				errs = append(errs, err)
-				if discardErr(err) {
-					badErr = true
-				} else {
-					goodErr = true
-				}
-			}
+			fail(err)
 		}
 	}
 	s.pendingTasks = nil
+
 	if errs == nil {
 		return nil
 	}
+
 	if goodErr && badErr {
 		good := 0
 		for _, err := range errs {
@@ -260,6 +276,16 @@ func discardErr(err error) bool {
 		}
 	}
 	return false
+}
+
+// Kill sends a kill notice to all pending tasks.
+func (s *State) Kill() {
+	s.killedMutex.Lock()
+	if !s.killedNoted {
+		s.killedNoted = true
+		s.killed <- true
+	}
+	s.killedMutex.Unlock()
 }
 
 // EnvVar returns the value for the named environment variable in s.
@@ -565,7 +591,7 @@ func SetEnvVar(name string, value string) Pipe {
 //    p := pipe.Line(
 //        pipe.ReadFile("article.ps"),
 //        pipe.Exec("lpr"),
-//    )   
+//    )
 //    output, err := pipe.CombinedOutput(p)
 //
 func Line(p ...Pipe) Pipe {
@@ -655,7 +681,7 @@ func (rc *refCloser) Close() error {
 //            pipe.Exec("lpr"),
 //        ),
 //        pipe.RenameFile("article.ps", "article.ps.done"),
-//    )   
+//    )
 //    output, err := pipe.CombinedOutput(p)
 //
 func Script(p ...Pipe) Pipe {

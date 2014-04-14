@@ -4,13 +4,14 @@ import (
 	"bytes"
 	"fmt"
 	"io/ioutil"
-	"labix.org/v2/pipe"
-	. "launchpad.net/gocheck"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	. "gopkg.in/check.v1"
+	"gopkg.in/pipe.v2"
 )
 
 func Test(t *testing.T) {
@@ -51,19 +52,22 @@ func (S) TestExecRun(c *C) {
 }
 
 func (S) TestExecRunTimeout(c *C) {
-	p := pipe.Exec("/bin/sh", "-c", "sleep 1")
-	err := pipe.RunTimeout(p, 100 * time.Millisecond)
+	started := time.Now()
+	p := pipe.Exec("sleep", "1")
+	err := pipe.RunTimeout(p, 100*time.Millisecond)
 	c.Assert(err, ErrorMatches, "timeout")
+	c.Assert(time.Since(started) < time.Second, Equals, true)
 
 	path := filepath.Join(c.MkDir(), "file")
 	p = pipe.Exec("/bin/sh", "-c", "echo hello > "+path)
-	err = pipe.RunTimeout(p, 1 * time.Second)
+	err = pipe.RunTimeout(p, 1*time.Second)
 	c.Assert(err, IsNil)
 
 	data, err := ioutil.ReadFile(path)
 	c.Assert(err, IsNil)
 	c.Assert(string(data), Equals, "hello\n")
 }
+
 func (S) TestExecOutput(c *C) {
 	p := pipe.Exec("/bin/sh", "-c", "echo out1; echo err1 1>&2; echo out2; echo err2 1>&2")
 	output, err := pipe.Output(p)
@@ -72,12 +76,14 @@ func (S) TestExecOutput(c *C) {
 }
 
 func (S) TestExecOutputTimeout(c *C) {
-	p := pipe.Exec("/bin/sh", "-c", "sleep 1")
-	output, err := pipe.OutputTimeout(p, 100 * time.Millisecond)
+	started := time.Now()
+	p := pipe.Exec("sleep", "1")
+	output, err := pipe.OutputTimeout(p, 100*time.Millisecond)
 	c.Assert(err, ErrorMatches, "timeout")
+	c.Assert(time.Since(started) < time.Second, Equals, true)
 
 	p = pipe.Exec("/bin/sh", "-c", "echo out1; echo err1 1>&2; echo out2; echo err2 1>&2")
-	output, err = pipe.OutputTimeout(p, 1 * time.Second)
+	output, err = pipe.OutputTimeout(p, 1*time.Second)
 	c.Assert(err, IsNil)
 	c.Assert(string(output), Equals, "out1\nout2\n")
 }
@@ -90,12 +96,14 @@ func (S) TestExecCombinedOutput(c *C) {
 }
 
 func (S) TestExecCombinedOutputTimeout(c *C) {
-	p := pipe.Exec("/bin/sh", "-c", "sleep 1")
-	output, err := pipe.CombinedOutputTimeout(p, 100 * time.Millisecond)
+	started := time.Now()
+	p := pipe.Exec("sleep", "1")
+	output, err := pipe.CombinedOutputTimeout(p, 100*time.Millisecond)
 	c.Assert(err, ErrorMatches, "timeout")
+	c.Assert(time.Since(started) < time.Second, Equals, true)
 
 	p = pipe.Exec("/bin/sh", "-c", "echo out1; echo err1 1>&2; echo out2; echo err2 1>&2")
-	output, err = pipe.CombinedOutputTimeout(p, 1 * time.Second)
+	output, err = pipe.CombinedOutputTimeout(p, 1*time.Second)
 	c.Assert(err, IsNil)
 	c.Assert(string(output), Equals, "out1\nerr1\nout2\nerr2\n")
 }
@@ -109,15 +117,32 @@ func (S) TestExecDividedOutput(c *C) {
 }
 
 func (S) TestExecDividedOutputTimeout(c *C) {
-	p := pipe.Exec("/bin/sh", "-c", "sleep 1")
-	stdout, stderr, err := pipe.DividedOutputTimeout(p, 100 * time.Millisecond)
+	started := time.Now()
+	p := pipe.Exec("sleep", "1")
+	stdout, stderr, err := pipe.DividedOutputTimeout(p, 100*time.Millisecond)
 	c.Assert(err, ErrorMatches, "timeout")
+	c.Assert(time.Since(started) < time.Second, Equals, true)
 
 	p = pipe.Exec("/bin/sh", "-c", "echo out1; echo err1 1>&2; echo out2; echo err2 1>&2")
-	stdout, stderr, err = pipe.DividedOutputTimeout(p, 1 * time.Second)
+	stdout, stderr, err = pipe.DividedOutputTimeout(p, 1*time.Second)
 	c.Assert(err, IsNil)
 	c.Assert(string(stdout), Equals, "out1\nout2\n")
 	c.Assert(string(stderr), Equals, "err1\nerr2\n")
+}
+
+func (S) TestStateKill(c *C) {
+	started := time.Now()
+	p := pipe.Exec("sleep", "1")
+	s := pipe.NewState(nil, nil)
+	c.Assert(p(s), IsNil)
+	ch := make(chan error)
+	go func() {
+		ch <- s.RunTasks()
+	}()
+	time.Sleep(100 * time.Millisecond)
+	s.Kill()
+	c.Assert(<-ch, ErrorMatches, "explicitly killed")
+	c.Assert(time.Since(started) < 2*time.Second, Equals, true)
 }
 
 func (S) TestSystem(c *C) {
