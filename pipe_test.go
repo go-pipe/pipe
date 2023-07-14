@@ -174,7 +174,7 @@ func (S) TestLineTermination(c *C) {
 		pipe.Exec("true"),
 	)
 	output, err := pipe.Output(p)
-	c.Assert(err, ErrorMatches, `command "true": write \|1: broken pipe`)
+	c.Assert(err, ErrorMatches, `io: read/write on closed pipe`)
 	c.Assert(string(output), Equals, "")
 }
 
